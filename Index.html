@@ -1,0 +1,221 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hands-Free Card Scanner</title>
+  <style>
+    :root { --pad: 12px; }
+    html,body{margin:0;font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial}
+    #wrap{display:flex;flex-direction:column;gap:var(--pad);padding:var(--pad);max-width:960px;margin:0 auto}
+    video{width:100%;max-height:48vh;object-fit:cover;transform:scaleX(-1);border-radius:8px}
+    .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    .grow{flex:1 1 auto}
+    .btn{padding:8px 12px;border:1px solid #ccc;border-radius:6px;background:#f7f7f7}
+    .btn:active{transform:scale(0.99)}
+    #status{font-size:13px;opacity:0.8}
+    #ocr{white-space:pre-wrap;font-size:14px;border:1px solid #eee;padding:8px;border-radius:6px;min-height:48px;background:#fafafa}
+    iframe{width:100%;height:52vh;border:1px solid #eee;border-radius:8px;background:#fff}
+    label{font-size:13px;opacity:.8}
+    input[type="checkbox"]{transform:scale(1.2)}
+    input[type="number"]{width:80px}
+    #help{font-size:12px;opacity:.75}
+  </style>
+</head>
+<body>
+<div id="wrap">
+  <video id="v" autoplay playsinline muted></video>
+
+  <div class="row">
+    <button class="btn" id="toggle">⏸️ Pause</button>
+    <div class="row">
+      <label class="row"><input type="checkbox" id="soldOnly"> Sold/Completed</label>
+      <label class="row"><input type="checkbox" id="newly"> Newly Listed</label>
+      <label>Interval(ms): <input type="number" id="interval" min="600" step="100" value="1500"></label>
+    </div>
+    <div id="status" class="grow">Starting camera…</div>
+  </div>
+
+  <div class="row">
+    <input id="query" class="grow" placeholder="Search query (auto-filled from OCR)" />
+    <button class="btn" id="searchBtn">Search</button>
+  </div>
+
+  <div id="ocr">(no text yet)</div>
+
+  <iframe id="ebay" title="eBay results"></iframe>
+
+  <div id="help">
+    Tip: Fill the frame with the player name / set / card #. Good light = better OCR.  
+    Privacy: Your camera stays on-device; only a single JPEG frame is sent to OCR.Space when scanning.
+  </div>
+</div>
+
+<script>
+/*** 1) CONFIG — add your OCR key here ***/
+const OCR_KEY = K83715916788957; // ← put your OCR.Space key between quotes
+
+/*** 2) Elements ***/
+const v = document.getElementById('v');
+const statusEl = document.getElementById('status');
+const ocrEl = document.getElementById('ocr');
+const ebayIframe = document.getElementById('ebay');
+const inputQuery = document.getElementById('query');
+const btnToggle = document.getElementById('toggle');
+const btnSearch = document.getElementById('searchBtn');
+const soldOnly = document.getElementById('soldOnly');
+const newly = document.getElementById('newly');
+const intervalInput = document.getElementById('interval');
+
+/*** 3) Camera ***/
+let stream, timer = null, running = true, lastQuery = "", lastOCR = "", lastSearchAt = 0;
+
+async function startCamera(){
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: {ideal:"environment"}, width:{ideal:1280}, height:{ideal:720} },
+      audio: false
+    });
+    v.srcObject = stream;
+    statusEl.textContent = "Camera running — scanning automatically…";
+    startLoop();
+  }catch(err){
+    statusEl.textContent = "Camera blocked. Allow access and reload.";
+    console.error(err);
+  }
+}
+
+function grabFrameBase64(){
+  const track = stream.getVideoTracks()[0];
+  const settings = track.getSettings();
+  const w = settings.width || 1280, h = settings.height || 720;
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d');
+  // mirror back to normal
+  ctx.translate(w,0); ctx.scale(-1,1);
+  ctx.drawImage(v,0,0,w,h);
+  return c.toDataURL('image/jpeg', 0.85);
+}
+
+/*** 4) OCR ***/
+async function ocrOnce(){
+  try{
+    const base64 = grabFrameBase64();
+    const body = new URLSearchParams();
+    body.set('base64Image', base64);
+    body.set('language', 'eng');
+    body.set('OCREngine', '2');
+    body.set('scale', 'true');
+
+    const res = await fetch('https://api.ocr.space/parse/image', {
+      method: 'POST',
+      headers: { 'apikey': OCR_KEY, 'Content-Type':'application/x-www-form-urlencoded' },
+      body
+    });
+    const j = await res.json();
+    let text = "";
+    if (j && j.ParsedResults && j.ParsedResults[0]) {
+      text = (j.ParsedResults[0].ParsedText || "").trim();
+    }
+    ocrEl.textContent = text || "(no text detected yet)";
+    if (text && text !== lastOCR){
+      lastOCR = text;
+      const q = buildQuery(text);
+      inputQuery.value = q;
+      maybeSearch(q);
+    }
+  }catch(e){
+    statusEl.textContent = "OCR error — will retry…";
+    // console.error(e);
+  }
+}
+
+/*** 5) Query building heuristics (simple & safe) ***/
+function buildQuery(raw){
+  // Normalize spaces/lines
+  let t = raw.replace(/\r/g,' ').replace(/\n/g,' ').replace(/\s{2,}/g,' ').trim();
+
+  // Keep common tokens: letters, numbers, #, slash
+  t = t.replace(/[^a-z0-9#\/\-\s]/gi,' ');
+
+  // Pull likely useful bits: player line or longest phrase
+  const parts = t.split(' ');
+  // Cap to first ~12 tokens to avoid super-long queries
+  let q = parts.slice(0, 12).join(' ');
+
+  // Prefer to keep a card number like #123 if present anywhere
+  const numMatch = t.match(/#\s*\d{1,4}/);
+  if (numMatch && !q.includes(numMatch[0])) q += ' ' + numMatch[0].replace(/\s+/g,'');
+
+  // Common set/brand tokens to preserve (lightweight)
+  const keepTokens = ['Topps','Panini','Prizm','Donruss','Select','Mosaic','Optic','Bowman','Chrome','Upper','Deck','Fleer','Score','Hoops','RC','Rookie'];
+  keepTokens.forEach(tok => {
+    const re = new RegExp('\\b'+tok+'\\b','i');
+    if (re.test(t) && !new RegExp('\\b'+tok+'\\b','i').test(q)) q += ' ' + tok;
+  });
+
+  return q.trim();
+}
+
+/*** 6) eBay search ***/
+function ebayURL(query){
+  const base = 'https://www.ebay.com/sch/i.html?_nkw=';
+  const kw = encodeURIComponent(query);
+  const params = [];
+  if (soldOnly.checked){
+    params.push('LH_Sold=1','LH_Complete=1');
+  }
+  if (newly.checked){
+    params.push('_sop=10'); // newly listed
+  }
+  const tail = params.length ? '&' + params.join('&') : '';
+  return base + kw + tail;
+}
+
+function maybeSearch(q){
+  if (!q || q.length < 4) return;
+  const now = Date.now();
+  // Only update if changed and at least 5s since last load (prevents flicker)
+  if (q !== lastQuery && (now - lastSearchAt) > 5000){
+    lastQuery = q;
+    lastSearchAt = now;
+    ebayIframe.src = ebayURL(q);
+    statusEl.textContent = 'Searching eBay for: ' + q;
+    // Also post to parent (Thunkable) if embedded
+    try{ window.top.postMessage(JSON.stringify({type:'OCR_TEXT', text:lastOCR, query:q}), '*'); }catch(e){}
+  }
+}
+
+/*** 7) Loop control ***/
+function startLoop(){
+  stopLoop();
+  running = true;
+  btnToggle.textContent = '⏸️ Pause';
+  const ms = Math.max(600, parseInt(intervalInput.value || '1500', 10));
+  timer = setInterval(ocrOnce, ms);
+}
+function stopLoop(){
+  running = false;
+  btnToggle.textContent = '▶️ Resume';
+  if (timer) clearInterval(timer);
+  timer = null;
+}
+
+/*** 8) UI events ***/
+btnToggle.addEventListener('click', ()=>{
+  if (running) stopLoop(); else startLoop();
+});
+btnSearch.addEventListener('click', ()=>{
+  const q = (inputQuery.value || '').trim();
+  if (q) maybeSearch(q);
+});
+soldOnly.addEventListener('change', ()=> { if (lastQuery) maybeSearch(lastQuery); });
+newly.addEventListener('change', ()=> { if (lastQuery) maybeSearch(lastQuery); });
+intervalInput.addEventListener('change', ()=> { if (running) startLoop(); });
+
+/*** 9) Boot ***/
+startCamera();
+</script>
+</body>
+</html>
