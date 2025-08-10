@@ -5,21 +5,27 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Hands-Free Card Scanner</title>
   <style>
-    :root { --pad: 12px; }
-    html,body{margin:0;font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial}
+    :root { --pad:12px; }
+    html,body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial}
     #wrap{display:flex;flex-direction:column;gap:var(--pad);padding:var(--pad);max-width:960px;margin:0 auto}
-    video{width:100%;max-height:48vh;object-fit:cover;transform:scaleX(-1);border-radius:8px}
+    video{width:100%;max-height:48vh;object-fit:cover;transform:scaleX(-1);border-radius:8px;background:#000}
     .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
     .grow{flex:1 1 auto}
     .btn{padding:8px 12px;border:1px solid #ccc;border-radius:6px;background:#f7f7f7}
     .btn:active{transform:scale(0.99)}
-    #status{font-size:13px;opacity:0.8}
+    #status{font-size:13px;opacity:.8}
     #ocr{white-space:pre-wrap;font-size:14px;border:1px solid #eee;padding:8px;border-radius:6px;min-height:48px;background:#fafafa}
     iframe{width:100%;height:52vh;border:1px solid #eee;border-radius:8px;background:#fff}
     label{font-size:13px;opacity:.8}
     input[type="checkbox"]{transform:scale(1.2)}
-    input[type="number"]{width:80px}
+    input[type="number"]{width:88px}
     #help{font-size:12px;opacity:.75}
+    /* Start overlay button */
+    #startBtn{
+      position:fixed;inset:0;margin:auto;width:220px;height:56px;z-index:9999;
+      border-radius:10px;border:1px solid #ccc;background:#fff;font-size:16px;
+      box-shadow:0 2px 10px rgba(0,0,0,.15)
+    }
   </style>
 </head>
 <body>
@@ -33,7 +39,7 @@
       <label class="row"><input type="checkbox" id="newly"> Newly Listed</label>
       <label>Interval(ms): <input type="number" id="interval" min="600" step="100" value="1500"></label>
     </div>
-    <div id="status" class="grow">Starting camera…</div>
+    <div id="status" class="grow">Tap “Start Camera” below to allow access…</div>
   </div>
 
   <div class="row">
@@ -46,14 +52,17 @@
   <iframe id="ebay" title="eBay results"></iframe>
 
   <div id="help">
-    Tip: Fill the frame with the player name / set / card #. Good light = better OCR.  
-    Privacy: Your camera stays on-device; only a single JPEG frame is sent to OCR.Space when scanning.
+    Tip: Fill the frame with the player name / set / card #. Good light = better OCR.<br>
+    Privacy: Only a single JPEG frame is sent to OCR.Space while scanning.
   </div>
 </div>
 
+<!-- Start Camera overlay (fixes iOS permission/autoplay) -->
+<button id="startBtn">Start Camera</button>
+
 <script>
-/*** 1) CONFIG — add your OCR key here ***/
-const OCR_KEY = K83715916788957; // ← put your OCR.Space key between quotes
+/*** 1) CONFIG — paste your OCR key ***/
+const OCR_KEY = "K83715916788957"; // ← replace the text inside quotes
 
 /*** 2) Elements ***/
 const v = document.getElementById('v');
@@ -66,42 +75,49 @@ const btnSearch = document.getElementById('searchBtn');
 const soldOnly = document.getElementById('soldOnly');
 const newly = document.getElementById('newly');
 const intervalInput = document.getElementById('interval');
+const startBtn = document.getElementById('startBtn');
 
-/*** 3) Camera ***/
-let stream, timer = null, running = true, lastQuery = "", lastOCR = "", lastSearchAt = 0;
+/*** 3) State ***/
+let stream, timer=null, running=true, lastQuery="", lastOCR="", lastSearchAt=0;
 
+/*** 4) Camera ***/
 async function startCamera(){
   try{
     stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: {ideal:"environment"}, width:{ideal:1280}, height:{ideal:720} },
-      audio: false
+      video: { facingMode:{ideal:"environment"}, width:{ideal:1280}, height:{ideal:720} },
+      audio:false
     });
     v.srcObject = stream;
+    // iOS needs explicit play() after a user gesture
+    await v.play().catch(()=>{});
     statusEl.textContent = "Camera running — scanning automatically…";
+    if (startBtn) startBtn.style.display = 'none';
     startLoop();
   }catch(err){
-    statusEl.textContent = "Camera blocked. Allow access and reload.";
+    statusEl.textContent = "Camera blocked. Tap Start, allow camera, then try again.";
     console.error(err);
   }
 }
 
 function grabFrameBase64(){
+  if (!stream) return null;
   const track = stream.getVideoTracks()[0];
-  const settings = track.getSettings();
-  const w = settings.width || 1280, h = settings.height || 720;
+  if (!track) return null;
+  const s = track.getSettings();
+  const w = s.width || 1280, h = s.height || 720;
   const c = document.createElement('canvas');
   c.width = w; c.height = h;
   const ctx = c.getContext('2d');
-  // mirror back to normal
-  ctx.translate(w,0); ctx.scale(-1,1);
+  ctx.translate(w,0); ctx.scale(-1,1); // mirror back to normal
   ctx.drawImage(v,0,0,w,h);
   return c.toDataURL('image/jpeg', 0.85);
 }
 
-/*** 4) OCR ***/
+/*** 5) OCR ***/
 async function ocrOnce(){
   try{
     const base64 = grabFrameBase64();
+    if (!base64) return;
     const body = new URLSearchParams();
     body.set('base64Image', base64);
     body.set('language', 'eng');
@@ -114,80 +130,61 @@ async function ocrOnce(){
       body
     });
     const j = await res.json();
-    let text = "";
-    if (j && j.ParsedResults && j.ParsedResults[0]) {
-      text = (j.ParsedResults[0].ParsedText || "").trim();
-    }
-    ocrEl.textContent = text || "(no text detected yet)";
+    let text = (j && j.ParsedResults && j.ParsedResults[0] && j.ParsedResults[0].ParsedText || "").trim();
+
+    ocrEl.textContent = text || "(no text yet)";
     if (text && text !== lastOCR){
       lastOCR = text;
       const q = buildQuery(text);
       inputQuery.value = q;
       maybeSearch(q);
+      // also post to parent (Thunkable) if embedded
+      try{ window.top.postMessage(JSON.stringify({type:'OCR_TEXT', text, query:q}), '*'); }catch(e){}
     }
   }catch(e){
     statusEl.textContent = "OCR error — will retry…";
-    // console.error(e);
   }
 }
 
-/*** 5) Query building heuristics (simple & safe) ***/
+/*** 6) Build a reasonable search query ***/
 function buildQuery(raw){
-  // Normalize spaces/lines
   let t = raw.replace(/\r/g,' ').replace(/\n/g,' ').replace(/\s{2,}/g,' ').trim();
-
-  // Keep common tokens: letters, numbers, #, slash
-  t = t.replace(/[^a-z0-9#\/\-\s]/gi,' ');
-
-  // Pull likely useful bits: player line or longest phrase
-  const parts = t.split(' ');
-  // Cap to first ~12 tokens to avoid super-long queries
-  let q = parts.slice(0, 12).join(' ');
-
-  // Prefer to keep a card number like #123 if present anywhere
-  const numMatch = t.match(/#\s*\d{1,4}/);
-  if (numMatch && !q.includes(numMatch[0])) q += ' ' + numMatch[0].replace(/\s+/g,'');
-
-  // Common set/brand tokens to preserve (lightweight)
-  const keepTokens = ['Topps','Panini','Prizm','Donruss','Select','Mosaic','Optic','Bowman','Chrome','Upper','Deck','Fleer','Score','Hoops','RC','Rookie'];
-  keepTokens.forEach(tok => {
+  t = t.replace(/[^a-z0-9#\/\-\s]/gi,' '); // keep letters/numbers/#/-/slash/spaces
+  // first ~12 tokens
+  let q = t.split(' ').filter(Boolean).slice(0,12).join(' ');
+  // keep a #123 if present
+  const num = t.match(/#\s*\d{1,4}/);
+  if (num && !q.includes(num[0])) q += ' ' + num[0].replace(/\s+/g,'');
+  // preserve common brand tokens if present
+  const keep = ['Topps','Panini','Prizm','Donruss','Select','Mosaic','Optic','Bowman','Chrome','Upper','Deck','Fleer','Score','Hoops','RC','Rookie'];
+  keep.forEach(tok=>{
     const re = new RegExp('\\b'+tok+'\\b','i');
-    if (re.test(t) && !new RegExp('\\b'+tok+'\\b','i').test(q)) q += ' ' + tok;
+    if (re.test(t) && !re.test(q)) q += ' ' + tok;
   });
-
   return q.trim();
 }
 
-/*** 6) eBay search ***/
+/*** 7) eBay search ***/
 function ebayURL(query){
   const base = 'https://www.ebay.com/sch/i.html?_nkw=';
   const kw = encodeURIComponent(query);
-  const params = [];
-  if (soldOnly.checked){
-    params.push('LH_Sold=1','LH_Complete=1');
-  }
-  if (newly.checked){
-    params.push('_sop=10'); // newly listed
-  }
-  const tail = params.length ? '&' + params.join('&') : '';
-  return base + kw + tail;
+  const p = [];
+  if (soldOnly.checked){ p.push('LH_Sold=1','LH_Complete=1'); }
+  if (newly.checked){ p.push('_sop=10'); }
+  return base + kw + (p.length ? '&' + p.join('&') : '');
 }
 
 function maybeSearch(q){
   if (!q || q.length < 4) return;
   const now = Date.now();
-  // Only update if changed and at least 5s since last load (prevents flicker)
-  if (q !== lastQuery && (now - lastSearchAt) > 5000){
-    lastQuery = q;
-    lastSearchAt = now;
+  if (q !== lastQuery && (now - lastSearchAt) > 5000){ // 5s throttle
+    lastQuery = q; lastSearchAt = now;
     ebayIframe.src = ebayURL(q);
     statusEl.textContent = 'Searching eBay for: ' + q;
-    // Also post to parent (Thunkable) if embedded
-    try{ window.top.postMessage(JSON.stringify({type:'OCR_TEXT', text:lastOCR, query:q}), '*'); }catch(e){}
   }
 }
 
-/*** 7) Loop control ***/
+/*** 8) Loop control ***/
 function startLoop(){
   stopLoop();
   running = true;
@@ -202,20 +199,23 @@ function stopLoop(){
   timer = null;
 }
 
-/*** 8) UI events ***/
-btnToggle.addEventListener('click', ()=>{
-  if (running) stopLoop(); else startLoop();
-});
-btnSearch.addEventListener('click', ()=>{
-  const q = (inputQuery.value || '').trim();
-  if (q) maybeSearch(q);
-});
-soldOnly.addEventListener('change', ()=> { if (lastQuery) maybeSearch(lastQuery); });
-newly.addEventListener('change', ()=> { if (lastQuery) maybeSearch(lastQuery); });
-intervalInput.addEventListener('change', ()=> { if (running) startLoop(); });
+/*** 9) UI events ***/
+btnToggle.addEventListener('click', ()=>{ running ? stopLoop() : startLoop(); });
+btnSearch.addEventListener('click', ()=>{ const q=(inputQuery.value||'').trim(); if(q) maybeSearch(q); });
+soldOnly.addEventListener('change', ()=>{ if(lastQuery) maybeSearch(lastQuery); });
+newly.addEventListener('change', ()=>{ if(lastQuery) maybeSearch(lastQuery); });
+intervalInput.addEventListener('change', ()=>{ if(running) startLoop(); });
 
-/*** 9) Boot ***/
-startCamera();
+// Start overlay: user tap triggers permission on iOS
+startBtn.addEventListener('click', async ()=>{ await startCamera(); });
+
+// If camera permission already granted, auto-start
+document.addEventListener('DOMContentLoaded', async ()=>{
+  try{
+    const perm = await (navigator.permissions && navigator.permissions.query ? navigator.permissions.query({name:'camera'}) : null);
+    if (perm && perm.state === 'granted') { await startCamera(); }
+  }catch(e){ /* ignore */ }
+});
 </script>
 </body>
 </html>
