@@ -1,22 +1,24 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Sports Card Scanner</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root { --pad: 14px; }
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin:0; padding:var(--pad); background:#fafafa; }
-    #wrap { max-width: 960px; margin: 0 auto; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin:0; padding:var(--pad); background:#f7f7f7; color:#222; }
+    #wrap { max-width: 980px; margin: 0 auto; }
+    h2 { margin: 6px 0 10px; }
     video { width: 100%; max-height: 48vh; background:#000; border:1px solid #ddd; border-radius:8px; display:block; }
     .row { display:flex; gap:10px; align-items:center; margin:10px 0; flex-wrap:wrap; }
     button { padding:10px 14px; border-radius:8px; border:1px solid #ccc; background:#fff; cursor:pointer; }
-    #status { font-size: 14px; color:#666; }
-    #ocr, #query { width:100%; min-height:48px; background:#fff; border:1px solid #ddd; border-radius:8px; padding:8px; }
-    .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:10px; }
+    input[type="number"] { padding:8px; width:100px; }
+    #status { font-size: 14px; color:#555; margin: 6px 0; }
+    #visionText, #queryBox { width:100%; min-height:48px; background:#fff; border:1px solid #ddd; border-radius:8px; padding:8px; white-space:pre-wrap; }
+    .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:10px; margin-top:8px; }
     .card { background:#fff; border:1px solid #ddd; border-radius:10px; padding:10px; }
-    .price { font-weight:600; }
-    #startBtn { position:relative; z-index:2; }
+    .price { font-weight:600; margin-top:6px; }
+    .note { font-size:12px; color:#666; }
   </style>
 </head>
 <body>
@@ -26,44 +28,54 @@
   <video id="v" playsinline muted></video>
 
   <div class="row">
-    <button id="startBtn">Start Camera</button>
-    <button id="toggleBtn">Pause</button>
-    <label>Interval(ms): <input id="interval" type="number" value="1500" min="400" step="100"></label>
+    <button id="startBtn" type="button">Start Camera</button>
+    <button id="toggleBtn" type="button">Pause</button>
+    <label>Interval (ms):
+      <input id="interval" type="number" value="1500" min="400" step="100">
+    </label>
+    <button id="scanOnceBtn" type="button">Scan Once</button>
   </div>
 
   <div id="status">Idle.</div>
 
-  <h4>OCR Text</h4>
-  <div id="ocr">(no text yet)</div>
+  <h4>Vision Text (OCR + labels)</h4>
+  <div id="visionText">(none)</div>
 
   <h4>Search Query</h4>
-  <div id="query">(none)</div>
+  <div id="queryBox">(none)</div>
 
   <h4>eBay Results</h4>
   <div id="results" class="grid"></div>
+  <div class="note">Tip: good lighting and filling most of the frame with the card will improve results.</div>
 </div>
 
 <script>
+/* ====== EDIT THIS IF YOUR WORKER URL CHANGES ====== */
 const WORKER_BASE = "https://rough-glitter-4d48.jamie-davis81.workers.dev";
 
+/* Elements */
 const v = document.getElementById('v');
 const startBtn = document.getElementById('startBtn');
 const toggleBtn = document.getElementById('toggleBtn');
 const intervalInput = document.getElementById('interval');
+const scanOnceBtn = document.getElementById('scanOnceBtn');
 const statusEl = document.getElementById('status');
-const ocrEl = document.getElementById('ocr');
-const queryEl = document.getElementById('query');
+const visionEl = document.getElementById('visionText');
+const queryEl = document.getElementById('queryBox');
 const resultsEl = document.getElementById('results');
 
+/* State */
 let stream = null, timer = null, running = false;
+let lastQuery = "", lastSearchAt = 0;
+const MIN_DELAY = 8000; // ms between searches
+const REQUIRED_STABLE = 2; // scans in a row must match before searching
+let stableCount = 0, lastCombined = "";
 
-startBtn.addEventListener('click', async () => {
-  await startCamera();
-});
-toggleBtn.addEventListener('click', () => {
-  if (running) stopLoop(); else startLoop();
-});
+/* UI bindings */
+startBtn.addEventListener('click', startCamera);
+toggleBtn.addEventListener('click', () => running ? stopLoop() : startLoop());
 intervalInput.addEventListener('change', () => { if (running) startLoop(); });
+scanOnceBtn.addEventListener('click', scanOnce);
 
 async function startCamera(){
   try{
@@ -73,15 +85,14 @@ async function startCamera(){
     });
     v.srcObject = stream;
     await v.play().catch(()=>{});
-    statusEl.textContent = "Camera running — scanning automatically…";
     startBtn.style.display = 'none';
+    statusEl.textContent = "Camera running. Auto scan is active.";
     startLoop();
   }catch(e){
     console.error(e);
-    statusEl.textContent = "Camera blocked. Tap Start, allow camera, then retry.";
+    statusEl.textContent = "Camera blocked. Click Start and allow camera access.";
   }
 }
-
 function stopLoop(){
   running = false;
   toggleBtn.textContent = "Resume";
@@ -94,20 +105,19 @@ function startLoop(){
   toggleBtn.textContent = "Pause";
   const ms = Math.max(600, parseInt(intervalInput.value || "1500", 10));
   timer = setInterval(scanOnce, ms);
-  // fire one immediately
   scanOnce();
 }
 
+/* Capture a downsized frame for faster/cheaper processing */
 function grabFrameBase64(){
   if (!v || v.readyState < 2) return null;
   const w = v.videoWidth || 1280, h = v.videoHeight || 720;
-  // downscale & compress for faster OCR/AI
   const targetW = Math.min(1024, w);
   const targetH = Math.round(h * (targetW / w));
   const c = document.createElement('canvas');
   c.width = targetW; c.height = targetH;
   const ctx = c.getContext('2d');
-  // If preview is mirrored, draw normal for OCR/AI:
+  // draw un-mirrored for better OCR
   ctx.drawImage(v, 0, 0, targetW, targetH);
   return c.toDataURL('image/jpeg', 0.85);
 }
@@ -117,7 +127,7 @@ async function scanOnce(){
     const base64 = grabFrameBase64();
     if (!base64) return;
 
-    statusEl.textContent = "Scanning…";
+    statusEl.textContent = "Scanning...";
     const res = await fetch(WORKER_BASE + "/scan", {
       method: "POST",
       headers: { "Content-Type":"application/json" },
@@ -127,21 +137,41 @@ async function scanOnce(){
     const data = await res.json().catch(()=>({ok:false, error:"Bad JSON"}));
 
     if (!res.ok || !data.ok) {
-      console.warn("Scan error", data);
-      statusEl.textContent = `Scan error (${data?.stage || res.status}): ${data?.error || res.statusText}. Retrying…`;
+      statusEl.textContent = `Scan error (${data?.stage || res.status}): ${data?.error || res.statusText}. Retrying...`;
       return;
     }
 
-    // Show OCR text + query
-    ocrEl.textContent = (data.ocrText || "").trim() || "(no text)";
-    queryEl.textContent = data.query || "(no query)";
+    const combinedVisionText =
+      ((data.vision?.ocr || "") + " " +
+       (Array.isArray(data.vision?.entities) ? data.vision.entities.slice(0,3).join(" ") : "") + " " +
+       ((Array.isArray(data.vision?.guesses) && data.vision.guesses[0]) ? data.vision.guesses[0] : "")
+      ).replace(/\s+/g, " ").trim();
+
+    visionEl.textContent = combinedVisionText || "(none)";
+    queryEl.textContent = data.query || "(none)";
     statusEl.textContent = "OK";
 
-    // Render a few eBay results
-    renderEbay(data.ebay);
+    // Stability + cooldown to avoid constant refreshes
+    if (combinedVisionText === lastCombined) {
+      stableCount++;
+    } else {
+      stableCount = 1;
+      lastCombined = combinedVisionText;
+    }
+
+    const now = Date.now();
+    const canSearch = (stableCount >= REQUIRED_STABLE) && (now - lastSearchAt > MIN_DELAY);
+
+    if (canSearch && data.query) {
+      renderEbay(data.ebay);
+      lastSearchAt = now;
+      stableCount = 0;
+      lastQuery = data.query;
+    }
+
   }catch(e){
     console.error(e);
-    statusEl.textContent = "Scan error. Retrying…";
+    statusEl.textContent = "Scan error. Retrying...";
   }
 }
 
@@ -149,16 +179,15 @@ function renderEbay(payload){
   resultsEl.innerHTML = "";
   try{
     const items = payload?.findItemsByKeywordsResponse?.[0]?.searchResult?.[0]?.item || [];
-    items.slice(0, 8).forEach(it => {
+    items.slice(0, 12).forEach(it => {
       const title = it.title?.[0] || "Untitled";
       const price = it.sellingStatus?.[0]?.currentPrice?.[0]?.__value__ || "";
       const url = it.viewItemURL?.[0] || "#";
       const img = it.galleryURL?.[0] || "";
-
       const div = document.createElement('div');
       div.className = "card";
       div.innerHTML = `
-        <div><a href="${url}" target="_blank">${title}</a></div>
+        <div><a href="${url}" target="_blank" rel="noopener">${title}</a></div>
         ${img ? `<img src="${img}" alt="" style="max-width:100%;border-radius:6px;margin:6px 0;">` : ""}
         <div class="price">${price ? "$" + price : ""}</div>
       `;
@@ -172,6 +201,15 @@ function renderEbay(payload){
     resultsEl.innerHTML = "<div>Could not parse eBay response.</div>";
   }
 }
+
+/* Auto-start camera if already granted */
+document.addEventListener("DOMContentLoaded", function(){
+  if (navigator.permissions && navigator.permissions.query){
+    navigator.permissions.query({ name: "camera" })
+      .then(p => { if (p.state === "granted") startCamera(); })
+      .catch(()=>{});
+  }
+});
 </script>
 </body>
 </html>
