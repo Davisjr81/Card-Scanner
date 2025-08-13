@@ -1,36 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Sports Card Scanner</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  body { font-family: Arial, sans-serif; margin: 0; padding: 0; background: #f5f5f5; color:#222; }
+  header { background: #333; color: #fff; padding: 10px; text-align: center; }
+  main { padding: 10px; max-width: 980px; margin: 0 auto; }
+  video { width: 100%; max-height: 240px; background: #000; }
+  #status { margin-top: 6px; font-size: 14px; }
+  #ocr { background: #fff; padding: 8px; margin-top: 6px; min-height: 40px; font-size: 14px; border: 1px solid #ccc; white-space: pre-wrap; }
+  #controls { margin-top: 10px; display: grid; grid-template-columns: 1fr auto auto auto auto auto; gap: 6px; align-items: center; }
+  #controls input[type="text"] { padding: 6px; }
+  #controls button { padding: 6px 10px; }
+  #controls label { font-size: 13px; }
+  iframe { width: 100%; height: 420px; border: 1px solid #ddd; border-radius: 4px; background:#fff; margin-top: 10px; }
+  @media (max-width: 700px){
+    #controls { grid-template-columns: 1fr 1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Sports Card Scanner</h1>
+</header>
+
+<main>
+  <video id="v" autoplay playsinline muted></video>
+  <div id="status">Initializing camera...</div>
+  <div id="ocr">(No OCR text yet)</div>
+
+  <div id="controls">
+    <input type="text" id="query" placeholder="Search query" />
+    <button id="searchBtn" type="button">Search</button>
+    <button id="toggle" type="button">Pause</button>
+    <button id="startBtn" type="button">Start Camera</button>
+    <label><input type="checkbox" id="soldOnly" /> Sold Only</label>
+    <label><input type="checkbox" id="newly" /> Newly Listed</label>
+    <label>Interval (ms): <input type="number" id="interval" value="1500" min="500" step="100" /></label>
+  </div>
+
+  <iframe id="ebay" src=""></iframe>
+</main>
+
 <script>
-/*** 1) CONFIG ***/
-// Proxy endpoints for your Cloudflare Worker
-const PROXY_OCR = 'https://rough-glitter-4d48.jamie-davis81.workers.dev/ocrspace';
-const PROXY_VISION = 'https://rough-glitter-4d48.jamie-davis81.workers.dev/vision';
+/*** 1) CONFIG (point these to your Worker) ***/
+const PROXY_OCR = "https://rough-glitter-4d48.jamie-davis81.workers.dev/ocrspace";
+const PROXY_VISION = "https://rough-glitter-4d48.jamie-davis81.workers.dev/vision";
 
 /*** 2) Elements ***/
-const v = document.getElementById('v');
-const statusEl = document.getElementById('status');
-const ocrEl = document.getElementById('ocr');
-const ebayFrame = document.getElementById('ebay');
-const inputQuery = document.getElementById('query');
-const btnToggle = document.getElementById('toggle');
-const btnSearch = document.getElementById('searchBtn');
-const soldOnly = document.getElementById('soldOnly');
-const newly = document.getElementById('newly');
-const intervalInput = document.getElementById('interval');
-const startBtn = document.getElementById('startBtn');
+const v = document.getElementById("v");
+const statusEl = document.getElementById("status");
+const ocrEl = document.getElementById("ocr");
+const ebayFrame = document.getElementById("ebay");
+const inputQuery = document.getElementById("query");
+const btnToggle = document.getElementById("toggle");
+const btnSearch = document.getElementById("searchBtn");
+const soldOnly = document.getElementById("soldOnly");
+const newly = document.getElementById("newly");
+const intervalInput = document.getElementById("interval");
+const startBtn = document.getElementById("startBtn");
 
 /*** 3) State ***/
-let stream, timer=null, running=false, lastQuery='', lastOCR='', lastSearchAt=0;
+let stream = null;
+let timer = null;
+let running = false;
+let lastQuery = "";
+let lastOCR = "";
+let lastSearchAt = 0;
 
 /*** 4) Camera ***/
 async function startCamera(){
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode:'environment', width:{ideal:1280}, height:{ideal:720} }, audio:false });
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    });
     v.srcObject = stream;
-    await v.play().catch(()=>0);
-    statusEl.textContent = 'Camera running — scanning automatically.';
-    startBtn.style.display = 'none';
+    await v.play().catch(function(){});
+    statusEl.textContent = "Camera running. Scanning automatically.";
+    startBtn.style.display = "none";
     startLoop();
-  } catch(err) {
-    statusEl.textContent = 'Camera blocked. Tap Start, allow camera, then try again.';
+  } catch (err) {
+    statusEl.textContent = "Camera blocked. Click Start Camera, allow access, then try again.";
     console.error(err);
   }
 }
@@ -39,15 +93,16 @@ function grabFrameBase64(){
   if (!stream) return null;
   const track = stream.getVideoTracks()[0];
   if (!track) return null;
-  const s = track.getSettings();
-  const c = document.createElement('canvas');
-  c.width = s.width || 1280;
-  c.height = s.height || 720;
-  const ctx = c.getContext('2d');
+  const s = track.getSettings ? track.getSettings() : {};
+  const c = document.createElement("canvas");
+  c.width = s.width || v.videoWidth || 1280;
+  c.height = s.height || v.videoHeight || 720;
+  const ctx = c.getContext("2d");
+  // mirror fix for some mobile browsers: remove translate/scale if not needed
   ctx.translate(c.width, 0);
   ctx.scale(-1, 1);
-  ctx.drawImage(v, 0, 0);
-  return c.toDataURL('image/jpeg', 0.85);
+  ctx.drawImage(v, 0, 0, c.width, c.height);
+  return c.toDataURL("image/jpeg", 0.85);
 }
 
 /*** 5) OCR.Space via Worker ***/
@@ -56,13 +111,14 @@ async function ocrOnce(){
     const base64 = grabFrameBase64();
     if (!base64) return;
     const res = await fetch(PROXY_OCR, {
-      method: 'POST',
-      headers: { 'Content-Type':'application/json' },
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ imageBase64: base64 })
     });
-    if (!res.ok) throw new Error('HTTP '+res.status);
-    const { text = '' } = await res.json();
-    ocrEl.textContent = text || '(no text yet)';
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    const text = (data && data.text) ? data.text : "";
+    ocrEl.textContent = text || "(no text yet)";
     if (text && text !== lastOCR) {
       lastOCR = text;
       const q = buildQuery(text);
@@ -70,57 +126,67 @@ async function ocrOnce(){
       maybeSearch(q);
     }
   }catch(e){
-    console.log('OCR error', e);
-    statusEl.textContent = 'OCR error — will retry.';
+    console.log("OCR error", e);
+    statusEl.textContent = "OCR error. Will retry.";
   }
 }
 
-/*** 6) Google Vision via Worker (optional) ***/
+/*** 6) Google Vision via Worker ***/
 async function aiOnce(){
   try{
     const base64 = grabFrameBase64();
     if (!base64) return;
     const res = await fetch(PROXY_VISION, {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ imageBase64: base64 })
     });
     if (!res.ok) return;
-    const { ocr='', entities=[], guesses=[] } = await res.json();
-    const parts = [ocr, entities.slice(0,3).join(' '), guesses[0] || ''].filter(Boolean);
-    const q = parts.join(' ').replace(/\s+/g,' ').trim();
+    const simple = await res.json(); // { ocr, entities, guesses, logos }
+    const ocr = simple.ocr || "";
+    const entities = Array.isArray(simple.entities) ? simple.entities : [];
+    const guesses = Array.isArray(simple.guesses) ? simple.guesses : [];
+    const parts = [];
+    if (ocr) parts.push(ocr);
+    if (entities.length) parts.push(entities.slice(0,3).join(" "));
+    if (guesses.length) parts.push(guesses[0]);
+    const q = parts.join(" ").replace(/\s+/g, " ").trim();
     if (q && q !== inputQuery.value){
       inputQuery.value = q;
       maybeSearch(q);
     }
-  }catch(e){ console.log('Vision error', e); }
+  }catch(e){
+    console.log("Vision error", e);
+  }
 }
 
 /*** 7) Build a search query ***/
 function buildQuery(raw){
-  let q = raw || '';
-  q = q.replace(/[\r\n]+/g,' ').replace(/[^\w\s#-]/g,' ').trim();
-  const tok = q.split(/\s+/).slice(0,10).join(' ');
-  return tok;
+  var q = raw || "";
+  q = q.replace(/[\r\n]+/g, " ").replace(/[^\w\s#-]/g, " ").trim();
+  // keep first 10 tokens to avoid very long searches
+  var tokens = q.split(/\s+/).slice(0, 10);
+  return tokens.join(" ");
 }
 
 /*** 8) eBay search ***/
 function ebayURL(query){
-  const base = 'https://www.ebay.com/sch/i.html?_nkw=';
-  const kw = encodeURIComponent(query);
-  const p = [];
-  if (soldOnly.checked) p.push('LH_Sold=1','LH_Complete=1');
-  if (newly.checked) p.push('LH_Time=1');
-  return base + kw + (p.length ? '&' + p.join('&') : '');
+  var base = "https://www.ebay.com/sch/i.html?_nkw=";
+  var kw = encodeURIComponent(query);
+  var params = [];
+  if (soldOnly.checked) { params.push("LH_Sold=1", "LH_Complete=1"); }
+  if (newly.checked) { params.push("LH_Time=1"); }
+  return base + kw + (params.length ? "&" + params.join("&") : "");
 }
 
 function maybeSearch(q){
   if (!q || q.length < 4) return;
-  const now = Date.now();
+  var now = Date.now();
   if (q !== lastQuery && (now - lastSearchAt) > 5000){
-    lastQuery = q; lastSearchAt = now;
+    lastQuery = q;
+    lastSearchAt = now;
     ebayFrame.src = ebayURL(q);
-    statusEl.textContent = 'Searching eBay for: ' + q;
+    statusEl.textContent = "Searching eBay for: " + q;
   }
 }
 
@@ -128,31 +194,45 @@ function maybeSearch(q){
 function startLoop(){
   stopLoop();
   running = true;
-  btnToggle.textContent = '⏸ Pause';
-  const ms = Math.max(600, parseInt(intervalInput.value || '1500', 10));
-  timer = setInterval(() => { ocrOnce(); aiOnce(); }, ms);
+  btnToggle.textContent = "Pause";
+  var ms = Math.max(600, parseInt(intervalInput.value || "1500", 10));
+  timer = setInterval(function(){ ocrOnce(); aiOnce(); }, ms);
 }
 function stopLoop(){
   running = false;
-  btnToggle.textContent = '▶ Resume';
+  btnToggle.textContent = "Resume";
   if (timer) clearInterval(timer);
   timer = null;
 }
 
 /*** 10) UI events ***/
-btnToggle.addEventListener('click', () => { running ? stopLoop() : startLoop(); });
-btnSearch.addEventListener('click', () => { const q = inputQuery.value || ''; if(q) maybeSearch(q); });
-soldOnly.addEventListener('change', () => { if(lastQuery) maybeSearch(lastQuery); });
-newly.addEventListener('change', () => { if(lastQuery) maybeSearch(lastQuery); });
-intervalInput.addEventListener('change', () => { if(running) startLoop(); });
+btnToggle.addEventListener("click", function(){
+  if (running) stopLoop(); else startLoop();
+});
+btnSearch.addEventListener("click", function(){
+  var q = inputQuery.value || "";
+  if (q) maybeSearch(q);
+});
+soldOnly.addEventListener("change", function(){
+  if (lastQuery) maybeSearch(lastQuery);
+});
+newly.addEventListener("change", function(){
+  if (lastQuery) maybeSearch(lastQuery);
+});
+intervalInput.addEventListener("change", function(){
+  if (running) startLoop();
+});
+startBtn.addEventListener("click", function(){ startCamera(); });
 
-startBtn.addEventListener('click', async () => await startCamera());
-
-// Auto-start if permission already granted
-document.addEventListener('DOMContentLoaded', async () => {
-  try {
-    const perm = await (navigator.permissions && navigator.permissions.query ? navigator.permissions.query({name:'camera'}) : null);
-    if (perm && perm.state === 'granted') await startCamera();
-  } catch {}
+// Auto-start camera if already granted
+document.addEventListener("DOMContentLoaded", function(){
+  if (navigator.permissions && navigator.permissions.query){
+    navigator.permissions.query({ name: "camera" }).then(function(perm){
+      if (perm.state === "granted") startCamera();
+    }).catch(function(){});
+  }
 });
 </script>
+
+</body>
+</html>
