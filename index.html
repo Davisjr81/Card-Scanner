@@ -60,6 +60,7 @@
 <script>
 const WORKER_BASE = 'https://rough-glitter-4d48.jamie-davis81.workers.dev';
 const VIDEO_IDEAL = { width:{ideal:1920}, height:{ideal:1080}, facingMode:{ideal:'environment'} };
+
 const v = document.getElementById('v');
 const btnConnect = document.getElementById('btnConnect');
 const expEl = document.getElementById('exp');
@@ -78,7 +79,15 @@ const resultsEl = document.getElementById('ebayResults');
 
 let stream=null, timer=null, running=false, frozen=false, lastQuery='';
 
-// --- eBay connect/status ---
+function status(s){ statusEl.textContent = s || ''; }
+function setLive(isLive){
+  statePill.textContent = isLive ? 'Live' : 'Frozen';
+  statePill.style.background = isLive ? '' : '#fff7ed';
+  statePill.style.borderColor = isLive ? '#e5e7eb' : '#fdba74';
+  statePill.style.color = isLive ? '#334155' : '#9a3412';
+}
+
+// ---- eBay connect/status ----
 async function checkStatus(){
   try{
     const r = await fetch(`${WORKER_BASE}/status`);
@@ -95,11 +104,11 @@ async function checkStatus(){
         expEl.style.display = 'inline-block';
       }
     }
-  }catch{}
+  }catch(e){}
 }
 btnConnect.onclick = () => { location.href = `${WORKER_BASE}/auth/start`; };
 
-// --- Camera / scan loop (OCR stub; you can wire Vision again later) ---
+// ---- Camera & OCR (via Worker /vision) ----
 async function startCamera(){
   try{
     stream = await navigator.mediaDevices.getUserMedia({ video: VIDEO_IDEAL, audio:false });
@@ -114,32 +123,65 @@ function grabFrame(){
   const c = document.createElement('canvas'); c.width=w; c.height=h;
   const ctx = c.getContext('2d');
   ctx.translate(w,0); ctx.scale(-1,1);
+  ctx.filter = 'contrast(1.15) brightness(1.03)';
   ctx.drawImage(v,0,0,w,h);
   return c.toDataURL('image/jpeg', 0.9);
 }
-// Dummy OCR: just clears; you can wire back to /vision later
-async function scanOnce(){
-  if (frozen) return;
-  // placeholder – put your Vision call here if you want live OCR again
-  // const base64 = grabFrame(); send to WORKER_BASE + '/vision' ...
-  status('Ready. Type a manual query above or press Scan Once after you re‑enable Vision.');
+async function getTextFromFrame(base64){
+  const r = await fetch(`${WORKER_BASE}/vision`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ imageBase64: base64 })
+  });
+  const j = await r.json();
+  if (!j.ok) throw new Error(j.error || 'Vision failed');
+  return (j.ocr || '').replace(/\s+/g,' ').trim();
 }
 
+// ---- Query builder ----
+function buildQuery(text){
+  let q = text.replace(/[^\w\s\-]/g,' ').replace(/\s{2,}/g,' ').trim();
+  const toks = q.split(' ');
+  const keep = [];
+  for (const t of toks){
+    if (!t) continue;
+    if (/^(19|20)\d{2}$/.test(t)) { keep.push(t); continue; } // year
+    if (/^(Topps|Panini|Prizm|Select|Optic|Donruss|Bowman|Upper|Deck|Leaf|Mosaic|RC|Rookie)$/i.test(t)) { keep.push(t); continue; }
+    if (/^[A-Z][a-z]+$/.test(t)) { keep.push(t); continue; }  // name-ish
+    if (/^[A-Z]{2,}$/.test(t)) { keep.push(t); continue; }
+  }
+  if (keep.length >= 2) q = keep.slice(0, 12).join(' ');
+  return q || text || '';
+}
+
+// ---- Loop control ----
 function stopLoop(){ running=false; if(timer) clearInterval(timer), timer=null; btnToggle.textContent='Resume'; setLive(false); }
 function startLoop(){ if(frozen) return; stopLoop(); running=true; btnToggle.textContent='Pause'; setLive(true); timer=setInterval(scanOnce, Math.max(600, parseInt(intervalEl.value||'2200',10))); }
-function setLive(isLive){
-  statePill.textContent = isLive ? 'Live' : 'Frozen';
-  statePill.style.background = isLive ? '' : '#fff7ed';
-  statePill.style.borderColor = isLive ? '#e5e7eb' : '#fdba74';
-  statePill.style.color = isLive ? '#334155' : '#9a3412';
+
+// ---- Scan once ----
+async function scanOnce(){
+  if (frozen) return;
+  try{
+    status('Reading…');
+    const base64 = grabFrame(); if (!base64) return;
+    let text = await getTextFromFrame(base64);
+    if (text.length > 300) text = text.slice(0,300);
+    ocrEl.value = text || '(no text yet)';
+    if (!text) return;
+
+    const q = buildQuery(text);
+    queryEl.value = q;
+    if (q && q !== lastQuery) {
+      lastQuery = q;
+      await searchEbay(q, /*freezeAfter=*/true);
+    }
+    status('');
+  }catch(e){
+    status('Scan error — retrying');
+    console.error(e);
+  }
 }
 
-// --- Manual search & freeze after results ---
-btnManual.onclick = () => { const q=(manualEl.value||'').trim(); if(q){ queryEl.value=q; searchEbay(q,true); } };
-manualEl.addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); btnManual.click(); }});
-btnSearch.onclick = () => { const q=(queryEl.value||'').trim(); if(q){ searchEbay(q,true); } };
-
-// --- eBay search via Worker ---
+// ---- eBay search via Worker ----
 async function searchEbay(q, freezeAfter=false){
   try{
     status('Searching eBay…');
@@ -158,16 +200,29 @@ async function searchEbay(q, freezeAfter=false){
         <div><div style="font-weight:600">${title}</div><div>${price}</div>
         <a href="${link}" target="_blank" rel="noopener">View on eBay</a></div></div>`;
     }).join('');
-    if (freezeAfter){ frozen=true; stopLoop(); btnRescan.style.display='inline-block'; btnToggle.disabled=true; btnOnce.disabled=true; status('Frozen after results — click Rescan'); }
-  }catch(e){ resultsEl.innerHTML = `<div>Search failed: ${e}</div>`; } finally { if(!frozen) status(''); }
-}
-btnRescan.onclick = ()=>{ frozen=false; btnRescan.style.display='none'; btnToggle.disabled=false; btnOnce.disabled=false; lastQuery=''; startLoop(); };
 
-// --- Misc ---
+    if (freezeAfter){
+      frozen = true; stopLoop();
+      btnRescan.style.display='inline-block';
+      btnToggle.disabled=true; btnOnce.disabled=true;
+      status('Frozen after results — click Rescan');
+    }
+  }catch(e){
+    resultsEl.innerHTML = `<div>Search failed: ${e}</div>`;
+  }finally{
+    if (!frozen) status('');
+  }
+}
+
+// ---- Rescan + Manual ----
+btnRescan.onclick = ()=>{ frozen=false; btnRescan.style.display='none'; btnToggle.disabled=false; btnOnce.disabled=false; lastQuery=''; startLoop(); };
+btnSearch.onclick = () => { const q=(queryEl.value||'').trim(); if(q) searchEbay(q,true); };
+btnManual.onclick = () => { const q=(manualEl.value||'').trim(); if(q){ queryEl.value=q; searchEbay(q,true); } };
+manualEl.addEventListener('keydown', e => { if (e.key==='Enter'){ e.preventDefault(); btnManual.click(); }});
 btnToggle.onclick = () => running ? stopLoop() : startLoop();
 btnOnce.onclick = scanOnce;
-function status(s){ statusEl.textContent = s || ''; }
 
+// ---- Init ----
 document.addEventListener('DOMContentLoaded', async ()=>{
   await checkStatus();
   try{
