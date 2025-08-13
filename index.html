@@ -1,205 +1,167 @@
 <!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <title>Sports Card Scanner (Vision → eBay)</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <style>
-    :root { --pad: 14px; }
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin:0; padding:var(--pad); background:#f7f7f7; color:#222; }
-    #wrap { max-width: 980px; margin: 0 auto; }
-    h2 { margin: 6px 0 10px; }
-    video { width: 100%; max-height: 70vh; background:#000; border:1px solid #ddd; border-radius:8px; display:block; }
-    .row { display:flex; gap:10px; align-items:center; margin:10px 0; flex-wrap:wrap; }
-    button { padding:10px 14px; border-radius:8px; border:1px solid #ccc; background:#fff; cursor:pointer; }
-    input[type="number"] { padding:8px; width:110px; }
-    #status { font-size: 14px; color:#555; margin: 6px 0; }
-    #visionText, #queryBox { width:100%; min-height:48px; background:#fff; border:1px solid #ddd; border-radius:8px; padding:8px; white-space:pre-wrap; }
-    .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:10px; margin-top:8px; }
-    .card { background:#fff; border:1px solid #ddd; border-radius:10px; padding:10px; }
-    .price { font-weight:600; margin-top:6px; }
-    .note { font-size:12px; color:#666; }
-  </style>
-</head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sports Card Scanner</title>
+<style>
+  body{font-family:system-ui,Segoe UI,Arial;margin:1rem;max-width:920px}
+  #wrap{display:grid;grid-template-columns:1fr;gap:12px}
+  video,canvas{width:100%;border:1px solid #ccc;border-radius:8px;background:#000}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  textarea{width:100%;min-height:120px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
+  .card{border:1px solid #ddd;border-radius:8px;padding:8px}
+  .card img{max-width:100%;display:block;margin-bottom:6px}
+  small{opacity:.7}
+</style>
 <body>
-<div id="wrap">
-  <h2>Sports Card Scanner</h2>
+  <h1>Sports Card Scanner</h1>
+  <div id="wrap">
+    <video id="v" autoplay playsinline muted></video>
+    <div class="row">
+      <label>Interval (ms): <input id="interval" type="number" value="1800" min="300" step="100"></label>
+      <button id="btnStart">Start Camera</button>
+      <button id="btnScan">Scan Once</button>
+      <button id="btnToggle">Pause</button>
+      <span id="status"></span>
+    </div>
 
-  <video id="v" playsinline muted></video>
+    <h3>OCR Text</h3>
+    <textarea id="ocr" placeholder="(no text yet)"></textarea>
 
-  <div class="row">
-    <button id="startBtn" type="button">Start Camera</button>
-    <button id="toggleBtn" type="button">Pause</button>
-    <label>Interval (ms):
-      <input id="interval" type="number" value="3500" min="1200" step="100">
-    </label>
-    <button id="scanOnceBtn" type="button">Scan Once</button>
+    <h3>Search Query</h3>
+    <input id="query" placeholder="auto-filled from Vision/OCR" style="width:100%">
+
+    <h3>eBay Results</h3>
+    <div id="results" class="grid"></div>
+
+    <p><small>Tip: fill the frame with the card, avoid glare, keep it steady a moment.</small></p>
   </div>
 
-  <div id="status">Idle.</div>
-
-  <h4>Vision Text (OCR + labels/web)</h4>
-  <div id="visionText">(none)</div>
-
-  <h4>Search Query</h4>
-  <div id="queryBox">(none)</div>
-
-  <h4>eBay Results</h4>
-  <div id="results" class="grid"></div>
-  <div class="note">Tip: fill the frame with the card and avoid glare for better OCR.</div>
-</div>
-
 <script>
-const WORKER_BASE = "https://rough-glitter-4d48.jamie-davis81.workers.dev";
+const WORKER_URL = "https://YOUR-WORKER-NAME.YOURSUBDOMAIN.workers.dev";
 
 const v = document.getElementById('v');
-const startBtn = document.getElementById('startBtn');
-const toggleBtn = document.getElementById('toggleBtn');
-const intervalInput = document.getElementById('interval');
-const scanOnceBtn = document.getElementById('scanOnceBtn');
+const ocrEl = document.getElementById('ocr');
+const qEl = document.getElementById('query');
 const statusEl = document.getElementById('status');
-const visionEl = document.getElementById('visionText');
-const queryEl = document.getElementById('queryBox');
+const intervalEl = document.getElementById('interval');
+const btnStart = document.getElementById('btnStart');
+const btnScan = document.getElementById('btnScan');
+const btnToggle = document.getElementById('btnToggle');
 const resultsEl = document.getElementById('results');
 
-let stream = null, timer = null, running = false;
-let lastCombined = "", lastQuery = "", stableCount = 0, lastSearchAt = 0;
-const REQUIRED_STABLE = 3;   // require 3 consistent scans before search
-const MIN_DELAY = 12000;     // min ms between eBay searches
+let stream, timer=null, running=false;
 
-startBtn.addEventListener('click', startCamera);
-toggleBtn.addEventListener('click', () => running ? stopLoop() : startLoop());
-intervalInput.addEventListener('change', () => { if (running) startLoop(); });
-scanOnceBtn.addEventListener('click', scanOnce);
-
-async function startCamera(){
-  try{
+btnStart.onclick = async () => {
+  try {
     stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: "environment" }, width:{ideal:1920}, height:{ideal:1080} },
+      video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
       audio: false
     });
     v.srcObject = stream;
-    await v.play().catch(()=>{});
-    startBtn.style.display = 'none';
-    statusEl.textContent = "Camera running. Auto scan is active.";
+    v.onloadedmetadata = () => v.play().catch(()=>{});
+    statusEl.textContent = "Camera running...";
     startLoop();
-  }catch(e){
-    console.error(e);
+  } catch(e) {
     statusEl.textContent = "Camera blocked. Allow access and try again.";
+    console.error(e);
   }
-}
-function stopLoop(){
-  running = false;
-  toggleBtn.textContent = "Resume";
-  if (timer) clearInterval(timer);
-  timer = null;
-}
+};
+
+btnToggle.onclick = () => running ? stopLoop() : startLoop();
+btnScan.onclick = () => doScanOnce();
+
 function startLoop(){
   stopLoop();
   running = true;
-  toggleBtn.textContent = "Pause";
-  const ms = Math.max(1200, parseInt(intervalInput.value || "3500", 10));
-  timer = setInterval(scanOnce, ms);
-  scanOnce();
+  btnToggle.textContent = "Pause";
+  const ms = Math.max(600, parseInt(intervalEl.value || "1800",10));
+  timer = setInterval(doScanOnce, ms);
+}
+function stopLoop(){
+  running = false;
+  btnToggle.textContent = "Resume";
+  if (timer) clearInterval(timer), timer=null;
 }
 
-/* Capture a downsized frame for faster/cheaper processing */
-function grabFrameBase64(){
-  if (!v || v.readyState < 2) return null;
-  const w = v.videoWidth || 1920, h = v.videoHeight || 1080;
-  const targetW = Math.min(1280, w);
-  const targetH = Math.round(h * (targetW / w));
-  const c = document.createElement('canvas');
-  c.width = targetW; c.height = targetH;
-  const ctx = c.getContext('2d');
-  ctx.drawImage(v, 0, 0, targetW, targetH);
-  return c.toDataURL('image/jpeg', 0.85);
-}
-
-async function scanOnce(){
+async function doScanOnce(){
+  const img = await grabFrame();
+  if (!img) return;
+  statusEl.textContent = "Analyzing…";
   try{
-    const base64 = grabFrameBase64();
-    if (!base64) return;
-
-    statusEl.textContent = "Analyzing with Vision…";
-    const res = await fetch(WORKER_BASE + "/scan", {
+    const r = await fetch(WORKER_URL + "/scan", {
       method: "POST",
-      headers: { "Content-Type":"application/json" },
-      body: JSON.stringify({ imageBase64: base64 })
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ imageBase64: img })
     });
-    const data = await res.json().catch(()=>({ ok:false, error:"Bad JSON" }));
-
-    if (!res.ok || !data.ok) {
-      statusEl.textContent = `Scan error (${data?.stage || res.status}): ${data?.error || res.statusText}`;
-      return;
-    }
-
-    // Compose a readable summary of what Vision saw
-    const summary = [
-      data.vision?.ocr || "",
-      Array.isArray(data.vision?.entities) ? " | Labels: " + data.vision.entities.slice(0,3).join(", ") : "",
-      Array.isArray(data.vision?.guesses) && data.vision.guesses[0] ? " | Web: " + data.vision.guesses[0] : ""
-    ].join("").trim();
-    visionEl.textContent = summary || "(none)";
-
-    // Query from the Worker
-    queryEl.textContent = data.query || "(none)";
-
-    // Stabilize before hitting eBay
-    const combined = (summary + " " + (data.query || "")).trim();
-    if (combined === lastCombined) stableCount++; else { stableCount = 1; lastCombined = combined; }
-
-    const now = Date.now();
-    const canSearch = (stableCount >= REQUIRED_STABLE) && (now - lastSearchAt > MIN_DELAY);
-
-    if (canSearch && data.query && data.query !== lastQuery) {
-      statusEl.textContent = "Showing eBay results…";
-      renderEbay(data.ebay);
-      lastSearchAt = now;
-      lastQuery = data.query;
-      stableCount = 0;
-      statusEl.textContent = "OK";
-    } else {
-      statusEl.textContent = `Stabilizing (${stableCount}/${REQUIRED_STABLE})…`;
-    }
+    const data = await r.json();
+    if (!data.ok) throw new Error(data.error || "scan failed");
+    ocrEl.value = data.vision?.ocr || "";
+    qEl.value = data.query || "";
+    renderResults(data.ebay);
+    statusEl.textContent = "Done.";
   }catch(e){
+    statusEl.textContent = "Scan error: " + e.message;
     console.error(e);
-    statusEl.textContent = "Scan error. Retrying…";
   }
 }
 
-function renderEbay(payload){
+async function grabFrame(){
+  if (!stream) return null;
+  const track = stream.getVideoTracks()[0];
+  if (!track) return null;
+  const s = track.getSettings();
+  const w = s.width || 1280, h = s.height || 720;
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d');
+  // mirror back to normal if needed
+  ctx.translate(w,0); ctx.scale(-1,1);
+  ctx.drawImage(v, 0, 0, w, h);
+  return c.toDataURL('image/jpeg', 0.9);
+}
+
+function renderResults(payload){
   resultsEl.innerHTML = "";
-  try{
-    const items = payload?.findItemsByKeywordsResponse?.[0]?.searchResult?.[0]?.item || [];
-    items.slice(0, 12).forEach(it => {
-      const title = it.title?.[0] || "Untitled";
-      const price = it.sellingStatus?.[0]?.currentPrice?.[0]?.__value__ || "";
-      const url = it.viewItemURL?.[0] || "#";
-      const img = it.galleryURL?.[0] || "";
+  // Browse API
+  if (payload && payload.itemSummaries){
+    payload.itemSummaries.forEach(it=>{
       const div = document.createElement('div');
-      div.className = "card";
+      div.className = 'card';
+      const img = (it.image && it.image.imageUrl) || '';
+      const title = it.title || '(no title)';
+      const price = it.price ? `${it.price.value} ${it.price.currency}` : '';
       div.innerHTML = `
-        <div><a href="${url}" target="_blank" rel="noopener">${title}</a></div>
-        ${img ? `<img src="${img}" alt="" style="max-width:100%;border-radius:6px;margin:6px 0;">` : ""}
-        <div class="price">${price ? "$" + price : ""}</div>
+        ${img ? `<img src="${img}" alt="">` : ''}
+        <div><strong>${escapeHtml(title)}</strong></div>
+        <div>${price}</div>
+        ${it.itemWebUrl ? `<a href="${it.itemWebUrl}" target="_blank">View on eBay</a>` : ''}
       `;
       resultsEl.appendChild(div);
     });
-    if (!items.length) resultsEl.innerHTML = "<div>(no matching items)</div>";
-  }catch(e){
-    resultsEl.innerHTML = "<div>Could not parse eBay response.</div>";
+    return;
   }
+  // Finding API
+  const resp = payload?.findItemsByKeywordsResponse?.[0];
+  const items = resp?.searchResult?.[0]?.item || [];
+  items.forEach(it=>{
+    const title = it.title?.[0] || '(no title)';
+    const img = it.galleryURL?.[0] || '';
+    const price = it.sellingStatus?.[0]?.currentPrice?.[0]?.__value__ || '';
+    const cur = it.sellingStatus?.[0]?.currentPrice?.[0]?.["@currencyId"] || '';
+    const url = it.viewItemURL?.[0] || '#';
+    const div = document.createElement('div');
+    div.className = 'card';
+    div.innerHTML = `
+      ${img ? `<img src="${img}" alt="">` : ''}
+      <div><strong>${escapeHtml(title)}</strong></div>
+      <div>${price} ${cur}</div>
+      <a href="${url}" target="_blank">View on eBay</a>
+    `;
+    resultsEl.appendChild(div);
+  });
 }
 
-/* Auto-start camera if already granted */
-document.addEventListener("DOMContentLoaded", function(){
-  if (navigator.permissions && navigator.permissions.query){
-    navigator.permissions.query({ name: "camera" })
-      .then(p => { if (p.state === "granted") startCamera(); })
-      .catch(()=>{});
-  }
-});
+function escapeHtml(s){ return String(s).replace(/[&<>"]/g,c=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 </script>
 </body>
-</html>
