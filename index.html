@@ -1,74 +1,14 @@
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Hands-Free Card Scanner</title>
-  <style>
-    :root { --pad:12px; }
-    html,body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial}
-    #wrap{display:flex;flex-direction:column;gap:var(--pad);padding:var(--pad);max-width:960px;margin:0 auto}
-    video{width:100%;max-height:48vh;object-fit:cover;transform:scaleX(-1);border-radius:8px;background:#000}
-    .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-    .grow{flex:1 1 auto}
-    .btn{padding:8px 12px;border:1px solid #ccc;border-radius:6px;background:#f7f7f7}
-    .btn:active{transform:scale(0.99)}
-    #status{font-size:13px;opacity:.8}
-    #ocr{white-space:pre-wrap;font-size:14px;border:1px solid #eee;padding:8px;border-radius:6px;min-height:48px;background:#fafafa}
-    iframe{width:100%;height:52vh;border:1px solid #eee;border-radius:8px;background:#fff}
-    label{font-size:13px;opacity:.8}
-    input[type="checkbox"]{transform:scale(1.2)}
-    input[type="number"]{width:88px}
-    #help{font-size:12px;opacity:.75}
-    /* Start overlay button */
-    #startBtn{
-      position:fixed;inset:0;margin:auto;width:220px;height:56px;z-index:9999;
-      border-radius:10px;border:1px solid #ccc;background:#fff;font-size:16px;
-      box-shadow:0 2px 10px rgba(0,0,0,.15)
-    }
-  </style>
-</head>
-<body>
-<div id="wrap">
-  <video id="v" autoplay playsinline muted></video>
-
-  <div class="row">
-    <button class="btn" id="toggle">⏸️ Pause</button>
-    <div class="row">
-      <label class="row"><input type="checkbox" id="soldOnly"> Sold/Completed</label>
-      <label class="row"><input type="checkbox" id="newly"> Newly Listed</label>
-      <label>Interval(ms): <input type="number" id="interval" min="600" step="100" value="1500"></label>
-    </div>
-    <div id="status" class="grow">Tap “Start Camera” below to allow access…</div>
-  </div>
-
-  <div class="row">
-    <input id="query" class="grow" placeholder="Search query (auto-filled from OCR)" />
-    <button class="btn" id="searchBtn">Search</button>
-  </div>
-
-  <div id="ocr">(no text yet)</div>
-
-  <iframe id="ebay" title="eBay results"></iframe>
-
-  <div id="help">
-    Tip: Fill the frame with the player name / set / card #. Good light = better OCR.<br>
-    Privacy: Only a single JPEG frame is sent to OCR.Space while scanning.
-  </div>
-</div>
-
-<!-- Start Camera overlay (fixes iOS permission/autoplay) -->
-<button id="startBtn">Start Camera</button>
-
 <script>
-/*** 1) CONFIG — paste your OCR key ***/
-const OCR_KEY = "YOUR_KEY"; // ← replace the text inside quotes
+/*** 1) CONFIG ***/
+// Proxy endpoints for your Cloudflare Worker
+const PROXY_OCR = 'https://rough-glitter-4d48.jamie-davis81.workers.dev/ocrspace';
+const PROXY_VISION = 'https://rough-glitter-4d48.jamie-davis81.workers.dev/vision';
 
 /*** 2) Elements ***/
 const v = document.getElementById('v');
 const statusEl = document.getElementById('status');
 const ocrEl = document.getElementById('ocr');
-const ebayIframe = document.getElementById('ebay');
+const ebayFrame = document.getElementById('ebay');
 const inputQuery = document.getElementById('query');
 const btnToggle = document.getElementById('toggle');
 const btnSearch = document.getElementById('searchBtn');
@@ -78,23 +18,19 @@ const intervalInput = document.getElementById('interval');
 const startBtn = document.getElementById('startBtn');
 
 /*** 3) State ***/
-let stream, timer=null, running=true, lastQuery="", lastOCR="", lastSearchAt=0;
+let stream, timer=null, running=false, lastQuery='', lastOCR='', lastSearchAt=0;
 
 /*** 4) Camera ***/
 async function startCamera(){
-  try{
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode:{ideal:"environment"}, width:{ideal:1280}, height:{ideal:720} },
-      audio:false
-    });
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode:'environment', width:{ideal:1280}, height:{ideal:720} }, audio:false });
     v.srcObject = stream;
-    // iOS needs explicit play() after a user gesture
-    await v.play().catch(()=>{});
-    statusEl.textContent = "Camera running — scanning automatically…";
-    if (startBtn) startBtn.style.display = 'none';
+    await v.play().catch(()=>0);
+    statusEl.textContent = 'Camera running — scanning automatically.';
+    startBtn.style.display = 'none';
     startLoop();
-  }catch(err){
-    statusEl.textContent = "Camera blocked. Tap Start, allow camera, then try again.";
+  } catch(err) {
+    statusEl.textContent = 'Camera blocked. Tap Start, allow camera, then try again.';
     console.error(err);
   }
 }
@@ -104,118 +40,119 @@ function grabFrameBase64(){
   const track = stream.getVideoTracks()[0];
   if (!track) return null;
   const s = track.getSettings();
-  const w = s.width || 1280, h = s.height || 720;
   const c = document.createElement('canvas');
-  c.width = w; c.height = h;
+  c.width = s.width || 1280;
+  c.height = s.height || 720;
   const ctx = c.getContext('2d');
-  ctx.translate(w,0); ctx.scale(-1,1); // mirror back to normal
-  ctx.drawImage(v,0,0,w,h);
+  ctx.translate(c.width, 0);
+  ctx.scale(-1, 1);
+  ctx.drawImage(v, 0, 0);
   return c.toDataURL('image/jpeg', 0.85);
 }
 
-/*** 5) OCR ***/
+/*** 5) OCR.Space via Worker ***/
 async function ocrOnce(){
   try{
     const base64 = grabFrameBase64();
     if (!base64) return;
-    const body = new URLSearchParams();
-    body.set('base64Image', base64);
-    body.set('language', 'eng');
-    body.set('OCREngine', '2');
-    body.set('scale', 'true');
-
-    const res = await fetch('https://api.ocr.space/parse/image', {
+    const res = await fetch(PROXY_OCR, {
       method: 'POST',
-      headers: { 'apikey': OCR_KEY, 'Content-Type':'application/x-www-form-urlencoded' },
-      body
+      headers: { 'Content-Type':'application/json' },
+      body: JSON.stringify({ imageBase64: base64 })
     });
-    const j = await res.json();
-    let text = (j && j.ParsedResults && j.ParsedResults[0] && j.ParsedResults[0].ParsedText || "").trim();
-
-    ocrEl.textContent = text || "(no text yet)";
-    if (text && text !== lastOCR){
+    if (!res.ok) throw new Error('HTTP '+res.status);
+    const { text = '' } = await res.json();
+    ocrEl.textContent = text || '(no text yet)';
+    if (text && text !== lastOCR) {
       lastOCR = text;
       const q = buildQuery(text);
       inputQuery.value = q;
       maybeSearch(q);
-      // also post to parent (Thunkable) if embedded
-      try{ window.top.postMessage(JSON.stringify({type:'OCR_TEXT', text, query:q}), '*'); }catch(e){}
     }
   }catch(e){
-    statusEl.textContent = "OCR error — will retry…";
+    console.log('OCR error', e);
+    statusEl.textContent = 'OCR error — will retry.';
   }
 }
 
-/*** 6) Build a reasonable search query ***/
-function buildQuery(raw){
-  let t = raw.replace(/\r/g,' ').replace(/\n/g,' ').replace(/\s{2,}/g,' ').trim();
-  t = t.replace(/[^a-z0-9#\/\-\s]/gi,' '); // keep letters/numbers/#/-/slash/spaces
-  // first ~12 tokens
-  let q = t.split(' ').filter(Boolean).slice(0,12).join(' ');
-  // keep a #123 if present
-  const num = t.match(/#\s*\d{1,4}/);
-  if (num && !q.includes(num[0])) q += ' ' + num[0].replace(/\s+/g,'');
-  // preserve common brand tokens if present
-  const keep = ['Topps','Panini','Prizm','Donruss','Select','Mosaic','Optic','Bowman','Chrome','Upper','Deck','Fleer','Score','Hoops','RC','Rookie'];
-  keep.forEach(tok=>{
-    const re = new RegExp('\\b'+tok+'\\b','i');
-    if (re.test(t) && !re.test(q)) q += ' ' + tok;
-  });
-  return q.trim();
+/*** 6) Google Vision via Worker (optional) ***/
+async function aiOnce(){
+  try{
+    const base64 = grabFrameBase64();
+    if (!base64) return;
+    const res = await fetch(PROXY_VISION, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ imageBase64: base64 })
+    });
+    if (!res.ok) return;
+    const { ocr='', entities=[], guesses=[] } = await res.json();
+    const parts = [ocr, entities.slice(0,3).join(' '), guesses[0] || ''].filter(Boolean);
+    const q = parts.join(' ').replace(/\s+/g,' ').trim();
+    if (q && q !== inputQuery.value){
+      inputQuery.value = q;
+      maybeSearch(q);
+    }
+  }catch(e){ console.log('Vision error', e); }
 }
 
-/*** 7) eBay search ***/
+/*** 7) Build a search query ***/
+function buildQuery(raw){
+  let q = raw || '';
+  q = q.replace(/[\r\n]+/g,' ').replace(/[^\w\s#-]/g,' ').trim();
+  const tok = q.split(/\s+/).slice(0,10).join(' ');
+  return tok;
+}
+
+/*** 8) eBay search ***/
 function ebayURL(query){
   const base = 'https://www.ebay.com/sch/i.html?_nkw=';
   const kw = encodeURIComponent(query);
   const p = [];
-  if (soldOnly.checked){ p.push('LH_Sold=1','LH_Complete=1'); }
-  if (newly.checked){ p.push('_sop=10'); }
+  if (soldOnly.checked) p.push('LH_Sold=1','LH_Complete=1');
+  if (newly.checked) p.push('LH_Time=1');
   return base + kw + (p.length ? '&' + p.join('&') : '');
 }
 
 function maybeSearch(q){
   if (!q || q.length < 4) return;
   const now = Date.now();
-  if (q !== lastQuery && (now - lastSearchAt) > 5000){ // 5s throttle
+  if (q !== lastQuery && (now - lastSearchAt) > 5000){
     lastQuery = q; lastSearchAt = now;
-    ebayIframe.src = ebayURL(q);
+    ebayFrame.src = ebayURL(q);
     statusEl.textContent = 'Searching eBay for: ' + q;
   }
 }
 
-/*** 8) Loop control ***/
+/*** 9) Loop control ***/
 function startLoop(){
   stopLoop();
   running = true;
-  btnToggle.textContent = '⏸️ Pause';
+  btnToggle.textContent = '⏸ Pause';
   const ms = Math.max(600, parseInt(intervalInput.value || '1500', 10));
-  timer = setInterval(ocrOnce, ms);
+  timer = setInterval(() => { ocrOnce(); aiOnce(); }, ms);
 }
 function stopLoop(){
   running = false;
-  btnToggle.textContent = '▶️ Resume';
+  btnToggle.textContent = '▶ Resume';
   if (timer) clearInterval(timer);
   timer = null;
 }
 
-/*** 9) UI events ***/
-btnToggle.addEventListener('click', ()=>{ running ? stopLoop() : startLoop(); });
-btnSearch.addEventListener('click', ()=>{ const q=(inputQuery.value||'').trim(); if(q) maybeSearch(q); });
-soldOnly.addEventListener('change', ()=>{ if(lastQuery) maybeSearch(lastQuery); });
-newly.addEventListener('change', ()=>{ if(lastQuery) maybeSearch(lastQuery); });
-intervalInput.addEventListener('change', ()=>{ if(running) startLoop(); });
+/*** 10) UI events ***/
+btnToggle.addEventListener('click', () => { running ? stopLoop() : startLoop(); });
+btnSearch.addEventListener('click', () => { const q = inputQuery.value || ''; if(q) maybeSearch(q); });
+soldOnly.addEventListener('change', () => { if(lastQuery) maybeSearch(lastQuery); });
+newly.addEventListener('change', () => { if(lastQuery) maybeSearch(lastQuery); });
+intervalInput.addEventListener('change', () => { if(running) startLoop(); });
 
-// Start overlay: user tap triggers permission on iOS
-startBtn.addEventListener('click', async ()=>{ await startCamera(); });
+startBtn.addEventListener('click', async () => await startCamera());
 
-// If camera permission already granted, auto-start
-document.addEventListener('DOMContentLoaded', async ()=>{
-  try{
+// Auto-start if permission already granted
+document.addEventListener('DOMContentLoaded', async () => {
+  try {
     const perm = await (navigator.permissions && navigator.permissions.query ? navigator.permissions.query({name:'camera'}) : null);
-    if (perm && perm.state === 'granted') { await startCamera(); }
-  }catch(e){ /* ignore */ }
+    if (perm && perm.state === 'granted') await startCamera();
+  } catch {}
 });
 </script>
-</body>
-</html>
