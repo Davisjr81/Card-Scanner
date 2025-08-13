@@ -30,7 +30,7 @@
 <main>
   <video id="v" autoplay playsinline muted></video>
   <div id="status">Initializing camera...</div>
-  <div id="ocr">(No OCR text yet)</div>
+  <div id="ocr">(No scan results yet)</div>
 
   <div id="controls">
     <input type="text" id="query" placeholder="Search query" />
@@ -39,18 +39,18 @@
     <button id="startBtn" type="button">Start Camera</button>
     <label><input type="checkbox" id="soldOnly" /> Sold Only</label>
     <label><input type="checkbox" id="newly" /> Newly Listed</label>
-    <label>Interval (ms): <input type="number" id="interval" value="1500" min="500" step="100" /></label>
+    <label>Interval (ms): <input type="number" id="interval" value="2000" min="500" step="100" /></label>
   </div>
 
   <iframe id="ebay" src=""></iframe>
 </main>
 
 <script>
-/*** 1) CONFIG (point these to your Worker) ***/
+/*** CONFIG: Point these to your Worker ***/
 const PROXY_OCR = "https://rough-glitter-4d48.jamie-davis81.workers.dev/ocrspace";
 const PROXY_VISION = "https://rough-glitter-4d48.jamie-davis81.workers.dev/vision";
 
-/*** 2) Elements ***/
+/*** Elements ***/
 const v = document.getElementById("v");
 const statusEl = document.getElementById("status");
 const ocrEl = document.getElementById("ocr");
@@ -63,15 +63,18 @@ const newly = document.getElementById("newly");
 const intervalInput = document.getElementById("interval");
 const startBtn = document.getElementById("startBtn");
 
-/*** 3) State ***/
+/*** State ***/
 let stream = null;
 let timer = null;
 let running = false;
 let lastQuery = "";
-let lastOCR = "";
+let lastCombined = "";
 let lastSearchAt = 0;
+let stableCount = 0;
+const REQUIRED_STABLE = 2;
+const MIN_DELAY = 10000; // ms between searches
 
-/*** 4) Camera ***/
+/*** Camera ***/
 async function startCamera(){
   try {
     stream = await navigator.mediaDevices.getUserMedia({
@@ -79,13 +82,12 @@ async function startCamera(){
       audio: false
     });
     v.srcObject = stream;
-    await v.play().catch(function(){});
-    statusEl.textContent = "Camera running. Scanning automatically.";
+    await v.play().catch(()=>{});
+    statusEl.textContent = "Camera running. Sequential OCR → Vision scan mode.";
     startBtn.style.display = "none";
     startLoop();
   } catch (err) {
-    statusEl.textContent = "Camera blocked. Click Start Camera, allow access, then try again.";
-    console.error(err);
+    statusEl.textContent = "Camera blocked. Allow access and retry.";
   }
 }
 
@@ -98,78 +100,73 @@ function grabFrameBase64(){
   c.width = s.width || v.videoWidth || 1280;
   c.height = s.height || v.videoHeight || 720;
   const ctx = c.getContext("2d");
-  // mirror fix for some mobile browsers: remove translate/scale if not needed
   ctx.translate(c.width, 0);
   ctx.scale(-1, 1);
   ctx.drawImage(v, 0, 0, c.width, c.height);
   return c.toDataURL("image/jpeg", 0.85);
 }
 
-/*** 5) OCR.Space via Worker ***/
-async function ocrOnce(){
-  try{
+/*** Sequential scan: OCR then Vision ***/
+async function scanOnce(){
+  try {
     const base64 = grabFrameBase64();
     if (!base64) return;
-    const res = await fetch(PROXY_OCR, {
+
+    // Step 1: OCR
+    statusEl.textContent = "Running OCR...";
+    const ocrRes = await fetch(PROXY_OCR, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ imageBase64: base64 })
     });
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    const data = await res.json();
-    const text = (data && data.text) ? data.text : "";
-    ocrEl.textContent = text || "(no text yet)";
-    if (text && text !== lastOCR) {
-      lastOCR = text;
-      const q = buildQuery(text);
-      inputQuery.value = q;
-      maybeSearch(q);
-    }
-  }catch(e){
-    console.log("OCR error", e);
-    statusEl.textContent = "OCR error. Will retry.";
-  }
-}
+    const ocrData = await ocrRes.json();
+    const ocrText = ocrData.text || "";
 
-/*** 6) Google Vision via Worker ***/
-async function aiOnce(){
-  try{
-    const base64 = grabFrameBase64();
-    if (!base64) return;
-    const res = await fetch(PROXY_VISION, {
+    // Step 2: Vision
+    statusEl.textContent = "Running Vision...";
+    const visionRes = await fetch(PROXY_VISION, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ imageBase64: base64 })
     });
-    if (!res.ok) return;
-    const simple = await res.json(); // { ocr, entities, guesses, logos }
-    const ocr = simple.ocr || "";
-    const entities = Array.isArray(simple.entities) ? simple.entities : [];
-    const guesses = Array.isArray(simple.guesses) ? simple.guesses : [];
-    const parts = [];
-    if (ocr) parts.push(ocr);
-    if (entities.length) parts.push(entities.slice(0,3).join(" "));
-    if (guesses.length) parts.push(guesses[0]);
-    const q = parts.join(" ").replace(/\s+/g, " ").trim();
-    if (q && q !== inputQuery.value){
+    const visionData = await visionRes.json();
+    const visionParts = [];
+    if (visionData.ocr) visionParts.push(visionData.ocr);
+    if (Array.isArray(visionData.entities)) visionParts.push(visionData.entities.slice(0,3).join(" "));
+    if (Array.isArray(visionData.guesses) && visionData.guesses.length) visionParts.push(visionData.guesses[0]);
+    const visionText = visionParts.join(" ").trim();
+
+    // Step 3: Combine results
+    const combined = (ocrText + " " + visionText).replace(/\s+/g, " ").trim();
+    ocrEl.textContent = combined || "(no text yet)";
+
+    // Step 4: Stability + search
+    if (combined === lastCombined){
+      stableCount++;
+    } else {
+      stableCount = 1;
+      lastCombined = combined;
+    }
+    if (stableCount >= REQUIRED_STABLE){
+      const q = buildQuery(combined);
       inputQuery.value = q;
       maybeSearch(q);
+      stableCount = 0;
     }
-  }catch(e){
-    console.log("Vision error", e);
+
+  } catch (e) {
+    statusEl.textContent = "Scan error. Retrying...";
   }
 }
 
-/*** 7) Build a search query ***/
+/*** Build query ***/
 function buildQuery(raw){
   var q = raw || "";
   q = q.replace(/[\r\n]+/g, " ").replace(/[^\w\s#-]/g, " ").trim();
-  // keep first 10 tokens to avoid very long searches
-  var tokens = q.split(/\s+/).slice(0, 10);
-  return tokens.join(" ");
+  return q.split(/\s+/).slice(0, 10).join(" ");
 }
 
-/*** 8) eBay search ***/
+/*** eBay search ***/
 function ebayURL(query){
   var base = "https://www.ebay.com/sch/i.html?_nkw=";
   var kw = encodeURIComponent(query);
@@ -180,32 +177,31 @@ function ebayURL(query){
 }
 
 function maybeSearch(q){
-  if (!q || q.length < 4) return;
   var now = Date.now();
-  if (q !== lastQuery && (now - lastSearchAt) > 5000){
-    lastQuery = q;
-    lastSearchAt = now;
-    ebayFrame.src = ebayURL(q);
-    statusEl.textContent = "Searching eBay for: " + q;
-  }
+  if (!q || q.length < 4) return;
+  if (q === lastQuery && (now - lastSearchAt) < MIN_DELAY) return;
+
+  lastQuery = q;
+  lastSearchAt = now;
+  ebayFrame.src = ebayURL(q);
+  statusEl.textContent = "Searching eBay for: " + q;
 }
 
-/*** 9) Loop control ***/
+/*** Loop control ***/
 function startLoop(){
   stopLoop();
   running = true;
   btnToggle.textContent = "Pause";
-  var ms = Math.max(600, parseInt(intervalInput.value || "1500", 10));
-  timer = setInterval(function(){ ocrOnce(); aiOnce(); }, ms);
+  var ms = Math.max(600, parseInt(intervalInput.value || "2000", 10));
+  timer = setInterval(scanOnce, ms);
 }
 function stopLoop(){
   running = false;
   btnToggle.textContent = "Resume";
   if (timer) clearInterval(timer);
-  timer = null;
 }
 
-/*** 10) UI events ***/
+/*** UI events ***/
 btnToggle.addEventListener("click", function(){
   if (running) stopLoop(); else startLoop();
 });
@@ -222,7 +218,7 @@ newly.addEventListener("change", function(){
 intervalInput.addEventListener("change", function(){
   if (running) startLoop();
 });
-startBtn.addEventListener("click", function(){ startCamera(); });
+startBtn.addEventListener("click", startCamera);
 
 // Auto-start camera if already granted
 document.addEventListener("DOMContentLoaded", function(){
