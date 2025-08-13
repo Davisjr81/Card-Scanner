@@ -1,88 +1,180 @@
-// Worker: /ebay (Browse API) + /vision (Google Vision OCR/labels)
-const ALLOW_ORIGIN = 'https://davisjr81.github.io'; // your GitHub Pages origin
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Sports Card Scanner</title>
+<style>
+  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial}
+  .wrap{max-width:980px;margin:0 auto;padding:14px}
+  video{width:100%;max-height:48vh;background:#000;border-radius:8px}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0}
+  .btn{padding:8px 14px;border:1px solid #ccc;border-radius:8px;background:#fff;font-weight:600;cursor:pointer}
+  .btn.primary{background:#2563eb;border-color:#2563eb;color:#fff}
+  .pill{padding:4px 8px;border:1px solid #e5e7eb;border-radius:999px;font-size:12px;color:#334155}
+  .item{display:flex;gap:12px;padding:10px 0;border-bottom:1px solid #eee}
+  .item img{width:80px;height:80px;object-fit:cover;border-radius:6px}
+  textarea{width:100%;height:110px;border:1px solid #ddd;border-radius:8px;padding:10px}
+  input[type=text],input[type=number]{padding:8px 10px;border:1px solid #ccc;border-radius:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Sports Card Scanner</h1>
 
-export default {
-  async fetch(request, env) {
-    const url = new URL(request.url);
-    if (request.method === 'OPTIONS') return cors204();
+  <div class="row">
+    <button id="btnConnect" class="btn primary" style="display:none">Connect eBay</button>
+    <span id="exp" class="pill" style="display:none"></span>
+  </div>
 
-    try {
-      if (url.pathname === '/' || url.pathname === '') {
-        return json({ ok: true, routes: ['GET /ebay?q=', 'POST /vision {imageBase64}'] });
+  <div class="row">
+    <input id="manual" type="text" placeholder="Type a search (e.g., 2019 Prizm Zion Williamson rookie)" style="flex:1">
+    <button id="btnManual" class="btn primary">Search</button>
+  </div>
+
+  <video id="v" playsinline muted></video>
+
+  <div class="row">
+    <button id="btnToggle" class="btn">Pause</button>
+    <div>Interval (ms): <input id="interval" type="number" value="2200" min="600" step="100" style="width:100px"></div>
+    <button id="btnOnce" class="btn">Scan Once</button>
+    <span id="status"></span>
+    <span id="statePill" class="pill">Live</span>
+    <button id="btnRescan" class="btn" style="margin-left:auto;display:none">Rescan</button>
+  </div>
+
+  <h3>OCR Text</h3>
+  <textarea id="ocr" readonly>(no text yet)</textarea>
+
+  <h3>Search Query</h3>
+  <input id="query" type="text" placeholder="Auto-filled from OCR…" style="width:100%">
+
+  <div class="row">
+    <button id="btnSearch" class="btn primary">Search</button>
+  </div>
+
+  <h3>eBay Results</h3>
+  <div id="ebayResults"></div>
+</div>
+
+<script>
+const WORKER_BASE = 'https://rough-glitter-4d48.jamie-davis81.workers.dev';
+const VIDEO_IDEAL = { width:{ideal:1920}, height:{ideal:1080}, facingMode:{ideal:'environment'} };
+const v = document.getElementById('v');
+const btnConnect = document.getElementById('btnConnect');
+const expEl = document.getElementById('exp');
+const manualEl = document.getElementById('manual');
+const btnManual = document.getElementById('btnManual');
+const btnToggle = document.getElementById('btnToggle');
+const btnOnce = document.getElementById('btnOnce');
+const btnSearch = document.getElementById('btnSearch');
+const btnRescan = document.getElementById('btnRescan');
+const intervalEl = document.getElementById('interval');
+const statusEl = document.getElementById('status');
+const statePill = document.getElementById('statePill');
+const ocrEl = document.getElementById('ocr');
+const queryEl = document.getElementById('query');
+const resultsEl = document.getElementById('ebayResults');
+
+let stream=null, timer=null, running=false, frozen=false, lastQuery='';
+
+// --- eBay connect/status ---
+async function checkStatus(){
+  try{
+    const r = await fetch(`${WORKER_BASE}/status`);
+    const j = await r.json();
+    if (!j.ok || !j.connected){
+      btnConnect.style.display = 'inline-block';
+      expEl.style.display = 'none';
+    } else {
+      btnConnect.style.display = 'none';
+      if (j.expiresAt){
+        const ms = (j.expiresAt*1000) - Date.now();
+        const mins = Math.max(0, Math.floor(ms/60000));
+        expEl.textContent = `Token OK · ~${mins}m left`;
+        expEl.style.display = 'inline-block';
       }
-
-      // ----- eBay search (Browse API) -----
-      if (url.pathname === '/ebay' && request.method === 'GET') {
-        if (!env.EBAY_USER_TOKEN) return json({ ok: false, error: 'Missing EBAY_USER_TOKEN' }, 500);
-        const q = url.searchParams.get('q') || '';
-        if (!q.trim()) return json({ ok: false, error: 'Missing q' }, 400);
-
-        const ebayUrl = new URL('https://api.ebay.com/buy/browse/v1/item_summary/search');
-        ebayUrl.searchParams.set('q', q);
-        ebayUrl.searchParams.set('limit', '12');
-
-        const r = await fetch(ebayUrl.toString(), {
-          headers: {
-            'Authorization': `Bearer ${env.EBAY_USER_TOKEN}`,
-            'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US',
-            'Accept': 'application/json'
-          }
-        });
-        const txt = await r.text();
-        let data; try { data = JSON.parse(txt); } catch { return json({ ok:false, status:r.status, body:txt }, r.status); }
-        return json({ ok: true, status: r.status, data });
-      }
-
-      // ----- Google Vision OCR / labels -----
-      if (url.pathname === '/vision' && request.method === 'POST') {
-        if (!env.GOOGLE_VISION_KEY) return json({ ok:false, error:'Missing GOOGLE_VISION_KEY' }, 500);
-        let body = {};
-        try { body = await request.json(); } catch {}
-        const b64 = String(body.imageBase64 || '').split(',').pop(); // strip data URL
-        if (!b64) return json({ ok:false, error:'No imageBase64' }, 400);
-
-        const payload = {
-          requests: [{
-            image: { content: b64 },
-            features: [
-              { type: 'TEXT_DETECTION' },
-              { type: 'LABEL_DETECTION', maxResults: 5 },
-              { type: 'WEB_DETECTION',   maxResults: 5 }
-            ]
-          }]
-        };
-
-        const vres = await fetch(`https://vision.googleapis.com/v1/images:annotate?key=${env.GOOGLE_VISION_KEY}`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
-        });
-        const vtxt = await vres.text();
-        if (!vres.ok) return json({ ok:false, stage:'vision', status:vres.status, error:vtxt.slice(0,500) }, vres.status);
-
-        const j = JSON.parse(vtxt);
-        const r = j?.responses?.[0] || {};
-        const ocr = r?.fullTextAnnotation?.text || '';
-        const labels = (r?.labelAnnotations || []).map(x => x.description).filter(Boolean);
-        const web = (r?.webDetection?.webEntities || []).map(x => x.description).filter(Boolean);
-
-        return json({ ok:true, ocr, labels, web });
-      }
-
-      return json({ ok:false, error:'Not Found' }, 404);
-    } catch (e) {
-      return json({ ok:false, error:String(e) }, 500);
     }
-  }
-};
-
-function corsHeaders() {
-  return {
-    'Access-Control-Allow-Origin': ALLOW_ORIGIN,
-    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization'
-  };
+  }catch{}
 }
-function cors204(){ return new Response(null, { status:204, headers: corsHeaders() }); }
-function json(obj, status=200){ return new Response(JSON.stringify(obj), { status, headers: { 'content-type':'application/json', ...corsHeaders() } }); }
+btnConnect.onclick = () => { location.href = `${WORKER_BASE}/auth/start`; };
 
-  return headers;
+// --- Camera / scan loop (OCR stub; you can wire Vision again later) ---
+async function startCamera(){
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({ video: VIDEO_IDEAL, audio:false });
+    v.srcObject = stream; await v.play();
+    startLoop();
+  }catch(e){ status('Camera blocked'); console.error(e); }
 }
+function grabFrame(){
+  if(!stream) return null;
+  const track = stream.getVideoTracks()[0]; if(!track) return null;
+  const s = track.getSettings(); const w=s.width||1280, h=s.height||720;
+  const c = document.createElement('canvas'); c.width=w; c.height=h;
+  const ctx = c.getContext('2d');
+  ctx.translate(w,0); ctx.scale(-1,1);
+  ctx.drawImage(v,0,0,w,h);
+  return c.toDataURL('image/jpeg', 0.9);
+}
+// Dummy OCR: just clears; you can wire back to /vision later
+async function scanOnce(){
+  if (frozen) return;
+  // placeholder – put your Vision call here if you want live OCR again
+  // const base64 = grabFrame(); send to WORKER_BASE + '/vision' ...
+  status('Ready. Type a manual query above or press Scan Once after you re‑enable Vision.');
+}
+
+function stopLoop(){ running=false; if(timer) clearInterval(timer), timer=null; btnToggle.textContent='Resume'; setLive(false); }
+function startLoop(){ if(frozen) return; stopLoop(); running=true; btnToggle.textContent='Pause'; setLive(true); timer=setInterval(scanOnce, Math.max(600, parseInt(intervalEl.value||'2200',10))); }
+function setLive(isLive){
+  statePill.textContent = isLive ? 'Live' : 'Frozen';
+  statePill.style.background = isLive ? '' : '#fff7ed';
+  statePill.style.borderColor = isLive ? '#e5e7eb' : '#fdba74';
+  statePill.style.color = isLive ? '#334155' : '#9a3412';
+}
+
+// --- Manual search & freeze after results ---
+btnManual.onclick = () => { const q=(manualEl.value||'').trim(); if(q){ queryEl.value=q; searchEbay(q,true); } };
+manualEl.addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); btnManual.click(); }});
+btnSearch.onclick = () => { const q=(queryEl.value||'').trim(); if(q){ searchEbay(q,true); } };
+
+// --- eBay search via Worker ---
+async function searchEbay(q, freezeAfter=false){
+  try{
+    status('Searching eBay…');
+    const r = await fetch(`${WORKER_BASE}/ebay?q=${encodeURIComponent(q)}`);
+    const j = await r.json();
+    if (!j.ok){ resultsEl.innerHTML = `<div>eBay error: ${j.status||''} ${j.error||''}</div>`; return; }
+    const items = (j.data && j.data.itemSummaries) || [];
+    if (!items.length){ resultsEl.innerHTML = '<div>No results.</div>'; return; }
+    resultsEl.innerHTML = items.map(it=>{
+      const title = it.title || '—';
+      const price = it.price ? `${it.price.value} ${it.price.currency}` : '';
+      const img = it.image?.imageUrl || '';
+      const link = it.itemWebUrl || '#';
+      return `<div class="item">
+        ${img ? `<img src="${img}" alt="">` : ''}
+        <div><div style="font-weight:600">${title}</div><div>${price}</div>
+        <a href="${link}" target="_blank" rel="noopener">View on eBay</a></div></div>`;
+    }).join('');
+    if (freezeAfter){ frozen=true; stopLoop(); btnRescan.style.display='inline-block'; btnToggle.disabled=true; btnOnce.disabled=true; status('Frozen after results — click Rescan'); }
+  }catch(e){ resultsEl.innerHTML = `<div>Search failed: ${e}</div>`; } finally { if(!frozen) status(''); }
+}
+btnRescan.onclick = ()=>{ frozen=false; btnRescan.style.display='none'; btnToggle.disabled=false; btnOnce.disabled=false; lastQuery=''; startLoop(); };
+
+// --- Misc ---
+btnToggle.onclick = () => running ? stopLoop() : startLoop();
+btnOnce.onclick = scanOnce;
+function status(s){ statusEl.textContent = s || ''; }
+
+document.addEventListener('DOMContentLoaded', async ()=>{
+  await checkStatus();
+  try{
+    const p = navigator.permissions && await navigator.permissions.query({ name:'camera' });
+    if (p && p.state==='granted') startCamera();
+  }catch{}
+});
+</script>
+</body>
+</html>
