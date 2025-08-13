@@ -1,84 +1,260 @@
-// Cloudflare Worker: eBay proxy
-// Routes:
-//   GET /        -> hello
-//   GET /ebay?q= -> searches eBay Browse API with your production token (stored as secret)
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sports Card Scanner</title>
+  <style>
+    :root { --pad:14px; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    .wrap { max-width: 980px; margin: 0 auto; padding: var(--pad); }
+    video { width: 100%; max-height: 48vh; background:#000; display:block; border-radius:8px; }
+    .row { display:flex; gap:10px; align-items:center; flex-wrap: wrap; margin: 10px 0; }
+    .btn { padding: 8px 14px; border:1px solid #ccc; border-radius:8px; background:#fff; cursor:pointer; font-weight:600; }
+    .btn.primary { background:#2563eb; color:#fff; border-color:#2563eb; }
+    .btn:disabled { opacity:.5; cursor:not-allowed; }
+    input[type="number"], input[type="text"] { padding:8px 10px; border:1px solid #ccc; border-radius:8px; }
+    #status { font-size:14px; color:#334155; min-height: 1.2em; }
+    textarea { width:100%; height:120px; border:1px solid #ddd; border-radius:8px; padding:10px; }
+    .hint { font-size: 12px; opacity:.7; }
+    .item { display:flex; gap:12px; padding:10px 0; border-bottom:1px solid #eee; }
+    .item img { width:80px; height:80px; object-fit:cover; border-radius:6px; }
+    .title { font-weight:600; }
+    footer { text-align:center; padding:20px 0; color:#64748b; font-size:13px; }
+    #startOverlay { position: fixed; inset: 0; background: rgba(255,255,255,.96); display:flex; align-items:center; justify-content:center; z-index: 10; }
+    #startCard { background:#fff; border:1px solid #e5e7eb; border-radius:12px; padding:18px; max-width: 480px; box-shadow: 0 10px 30px rgba(0,0,0,.08); }
+    #startCard h2 { margin:0 0 8px 0; }
+  </style>
+  <!-- Tesseract.js for in-browser OCR -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Sports Card Scanner</h1>
 
-// Allow your site to call this worker (adjust origin if needed)
-const ALLOW_ORIGIN = 'https://davisjr81.github.io';
+    <video id="v" playsinline muted></video>
 
-export default {
-  async fetch(request, env, ctx) {
-    try {
-      const url = new URL(request.url);
-      const path = url.pathname;
+    <div class="row">
+      <button id="btnToggle" class="btn">Pause</button>
+      <div>Interval (ms): <input id="interval" type="number" value="1800" min="400" step="100" style="width:100px"></div>
+      <button id="btnOnce" class="btn">Scan Once</button>
+      <span id="status"></span>
+    </div>
 
-      // CORS preflight
-      if (request.method === 'OPTIONS') {
-        return new Response(null, {
-          status: 204,
-          headers: corsHeaders(request.headers.get('Origin')),
-        });
-      }
+    <h2>OCR Text</h2>
+    <textarea id="ocr" readonly>(no text yet)</textarea>
 
-      if (path === '/' || path === '') {
-        return json({ ok: true, routes: ['GET /ebay?q='] });
-      }
+    <h2>Search Query</h2>
+    <input id="query" type="text" placeholder="Auto-filled from OCR…" style="width:100%">
+    <div class="row">
+      <button id="btnSearch" class="btn primary">Search</button>
+      <span class="hint">Tip: keep the card centered, avoid glare, steady 2–3 seconds.</span>
+    </div>
 
-      if (path === '/ebay') {
-        if (!env.EBAY_USER_TOKEN) {
-          return json({ ok: false, error: 'Missing EBAY_USER_TOKEN' }, 500, request);
-        }
-        const q = url.searchParams.get('q') || '';
-        if (!q.trim()) return json({ ok: false, error: 'Missing q' }, 400, request);
+    <h2>eBay Results</h2>
+    <div id="ebayResults"></div>
 
-        // Call eBay Browse API (Production)
-        const ebayUrl = new URL('https://api.ebay.com/buy/browse/v1/item_summary/search');
-        ebayUrl.searchParams.set('q', q);
-        ebayUrl.searchParams.set('limit', '10');
+    <footer>
+      <div>Powered by on-device OCR + eBay Browse API</div>
+      <div class="hint">If you see CORS errors, make sure your Worker allows origin <code>https://davisjr81.github.io</code>.</div>
+    </footer>
+  </div>
 
-        const resp = await fetch(ebayUrl.toString(), {
-          headers: {
-            'Authorization': `Bearer ${env.EBAY_USER_TOKEN}`,
-            'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US',
-            'Accept': 'application/json'
-          }
-        });
+  <!-- Start overlay (needed for iOS camera permission) -->
+  <div id="startOverlay">
+    <div id="startCard">
+      <h2>Start Camera</h2>
+      <p>Tap below to allow camera access. Keep the card flat and fill the frame.</p>
+      <button id="startBtn" class="btn primary" style="width:100%">Start Camera</button>
+    </div>
+  </div>
 
-        const text = await resp.text();
-        let data;
-        try { data = JSON.parse(text); } catch {
-          return json({ ok: false, status: resp.status, body: text }, resp.status, request);
-        }
-        return json({ ok: true, status: resp.status, data }, resp.status, request);
-      }
+<script>
+/*** CONFIG ***/
+const WORKER_BASE = 'https://rough-glitter-4d48.jamie-davis81.workers.dev'; // your Cloudflare Worker
+const MAX_OCR_LEN = 240; // limit raw text length
+const VIDEO_IDEAL = { width: {ideal: 1920}, height: {ideal: 1080}, facingMode: {ideal: 'environment'} }; // widen FOV
 
-      return json({ ok: false, error: 'Not Found' }, 404, request);
-    } catch (e) {
-      return json({ ok: false, error: String(e) }, 500, request);
-    }
+/*** Elements ***/
+const videoEl = document.getElementById('v');
+const btnToggle = document.getElementById('btnToggle');
+const btnOnce = document.getElementById('btnOnce');
+const btnSearch = document.getElementById('btnSearch');
+const intervalInput = document.getElementById('interval');
+const ocrEl = document.getElementById('ocr');
+const queryEl = document.getElementById('query');
+const statusEl = document.getElementById('status');
+const resultsEl = document.getElementById('ebayResults');
+const overlay = document.getElementById('startOverlay');
+const startBtn = document.getElementById('startBtn');
+
+/*** State ***/
+let stream = null, timer = null, running = false, lastQuery = '', lastOCR = '';
+
+/*** Camera ***/
+async function startCamera() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: VIDEO_IDEAL, audio: false });
+    videoEl.srcObject = stream;
+    await videoEl.play();
+    overlay.style.display = 'none';
+    status('Camera running — scanning automatically…');
+    startLoop();
+  } catch (e) {
+    status('Camera blocked. Please allow access, then try again.');
+    console.error(e);
   }
-};
-
-function json(obj, status = 200, req = null) {
-  const origin = req ? req.headers.get('Origin') : '*';
-  return new Response(JSON.stringify(obj), {
-    status,
-    headers: {
-      'content-type': 'application/json',
-      ...corsHeaders(origin)
-    }
-  });
 }
 
-function corsHeaders(origin) {
-  const headers = {
-    'Access-Control-Allow-Methods': 'GET,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-  };
-  if (origin && origin.startsWith(ALLOW_ORIGIN)) {
-    headers['Access-Control-Allow-Origin'] = ALLOW_ORIGIN;
-  } else {
-    headers['Access-Control-Allow-Origin'] = ALLOW_ORIGIN; // lock to your site
+function grabFrame() {
+  if (!stream) return null;
+  const track = stream.getVideoTracks()[0];
+  if (!track) return null;
+  const { width, height } = track.getSettings();
+  const w = width || 1280, h = height || 720;
+
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d');
+  // correct mirrored preview on some devices
+  ctx.translate(w, 0); ctx.scale(-1, 1);
+  ctx.drawImage(videoEl, 0, 0, w, h);
+  return c.toDataURL('image/jpeg', 0.9);
+}
+
+/*** OCR (Tesseract.js on-device) ***/
+async function runOCR() {
+  const base64 = grabFrame();
+  if (!base64) throw new Error('No frame');
+  const { data } = await Tesseract.recognize(base64, 'eng', { logger: () => {} });
+  let text = (data && data.text ? data.text : '').replace(/\s+/g, ' ').trim();
+  if (text.length > MAX_OCR_LEN) text = text.slice(0, MAX_OCR_LEN);
+  return text || '';
+}
+
+/*** Build query from OCR ***/
+function buildQuery(text) {
+  // Light cleanup: keep letters, numbers, spaces, dashes; strip noise
+  let q = text
+    .replace(/[^\w\s\-]/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+
+  // Heuristics: prefer words that look like names/brands/years
+  // Keep up to ~10 tokens
+  const keep = [];
+  const toks = q.split(' ');
+  for (const t of toks) {
+    if (!t) continue;
+    if (/^(topps|panini|prizm|select|optic|donruss|bowman|upper|deck|leaf|mosaic|rc|rookie|refactor|refractor|silver|baseball|basketball|football|mlb|nba|nfl)$/i.test(t)) {
+      keep.push(t);
+      continue;
+    }
+    if (/^(19|20)\d{2}$/.test(t)) { keep.push(t); continue; } // year
+    if (/^[A-Z][a-z]+$/.test(t)) { keep.push(t); continue; }  // name-ish token
+    if (/^[A-Z]{2,}$/.test(t)) { keep.push(t); continue; }
   }
+  if (keep.length >= 2) q = keep.slice(0, 12).join(' ');
+  return q || text || '';
+}
+
+/*** eBay search via Worker ***/
+async function searchEbay(query) {
+  try {
+    status('Searching eBay…');
+    const url = `${WORKER_BASE}/ebay?q=${encodeURIComponent(query)}`;
+    const res = await fetch(url);
+    const json = await res.json();
+
+    if (!json.ok) {
+      resultsEl.innerHTML = `<div>eBay error: ${json.status || ''} ${json.error || ''}</div>`;
+      return;
+    }
+
+    const items = (json.data && json.data.itemSummaries) || [];
+    if (!items.length) {
+      resultsEl.innerHTML = `<div>No results.</div>`;
+      return;
+    }
+
+    resultsEl.innerHTML = items.map(it => {
+      const title = it.title || '—';
+      const price = it.price ? `${it.price.value} ${it.price.currency}` : '';
+      const img = it.image && it.image.imageUrl ? it.image.imageUrl : '';
+      const link = it.itemWebUrl || '#';
+      return `
+        <div class="item">
+          ${img ? `<img src="${img}" alt="">` : ''}
+          <div>
+            <div class="title">${title}</div>
+            <div>${price}</div>
+            <a href="${link}" target="_blank" rel="noopener">View on eBay</a>
+          </div>
+        </div>`;
+    }).join('');
+  } catch (e) {
+    resultsEl.innerHTML = `<div>Search failed: ${e}</div>`;
+  } finally {
+    status('');
+  }
+}
+
+/*** Scanner loop ***/
+async function scanOnce() {
+  try {
+    status('Reading…');
+    const text = await runOCR();
+    ocrEl.value = text || '(no text yet)';
+    if (!text) return;
+
+    const q = buildQuery(text);
+    queryEl.value = q;
+    if (q && q !== lastQuery) {
+      lastQuery = q;
+      await searchEbay(q);
+    }
+  } catch (e) {
+    status('Scan error — retrying');
+    console.error(e);
+  }
+}
+
+function startLoop() {
+  stopLoop();
+  running = true;
+  btnToggle.textContent = 'Pause';
+  const ms = Math.max(600, parseInt(intervalInput.value || '1800', 10));
+  timer = setInterval(scanOnce, ms);
+}
+function stopLoop() {
+  running = false;
+  btnToggle.textContent = 'Resume';
+  if (timer) clearInterval(timer);
+  timer = null;
+}
+
+/*** UI wiring ***/
+btnToggle.addEventListener('click', () => running ? stopLoop() : startLoop());
+btnOnce.addEventListener('click', scanOnce);
+btnSearch.addEventListener('click', () => {
+  const q = (queryEl.value || '').trim();
+  if (q) searchEbay(q);
+});
+intervalInput.addEventListener('change', () => { if (running) startLoop(); });
+startBtn.addEventListener('click', startCamera);
+
+// If permission already granted, try to auto-start
+document.addEventListener('DOMContentLoaded', async () => {
+  try {
+    const p = navigator.permissions && await navigator.permissions.query({ name: 'camera' });
+    if (p && p.state === 'granted') startCamera();
+  } catch {}
+});
+
+function status(msg){ statusEl.textContent = msg || ''; }
+</script>
+</body>
+</html>
+
   return headers;
 }
