@@ -1,167 +1,84 @@
-<!doctype html>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sports Card Scanner</title>
-<style>
-  body{font-family:system-ui,Segoe UI,Arial;margin:1rem;max-width:920px}
-  #wrap{display:grid;grid-template-columns:1fr;gap:12px}
-  video,canvas{width:100%;border:1px solid #ccc;border-radius:8px;background:#000}
-  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-  textarea{width:100%;min-height:120px}
-  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
-  .card{border:1px solid #ddd;border-radius:8px;padding:8px}
-  .card img{max-width:100%;display:block;margin-bottom:6px}
-  small{opacity:.7}
-</style>
-<body>
-  <h1>Sports Card Scanner</h1>
-  <div id="wrap">
-    <video id="v" autoplay playsinline muted></video>
-    <div class="row">
-      <label>Interval (ms): <input id="interval" type="number" value="1800" min="300" step="100"></label>
-      <button id="btnStart">Start Camera</button>
-      <button id="btnScan">Scan Once</button>
-      <button id="btnToggle">Pause</button>
-      <span id="status"></span>
-    </div>
+// Cloudflare Worker: eBay proxy
+// Routes:
+//   GET /        -> hello
+//   GET /ebay?q= -> searches eBay Browse API with your production token (stored as secret)
 
-    <h3>OCR Text</h3>
-    <textarea id="ocr" placeholder="(no text yet)"></textarea>
+// Allow your site to call this worker (adjust origin if needed)
+const ALLOW_ORIGIN = 'https://davisjr81.github.io';
 
-    <h3>Search Query</h3>
-    <input id="query" placeholder="auto-filled from Vision/OCR" style="width:100%">
+export default {
+  async fetch(request, env, ctx) {
+    try {
+      const url = new URL(request.url);
+      const path = url.pathname;
 
-    <h3>eBay Results</h3>
-    <div id="results" class="grid"></div>
+      // CORS preflight
+      if (request.method === 'OPTIONS') {
+        return new Response(null, {
+          status: 204,
+          headers: corsHeaders(request.headers.get('Origin')),
+        });
+      }
 
-    <p><small>Tip: fill the frame with the card, avoid glare, keep it steady a moment.</small></p>
-  </div>
+      if (path === '/' || path === '') {
+        return json({ ok: true, routes: ['GET /ebay?q='] });
+      }
 
-<script>
-const WORKER_URL = "https://YOUR-WORKER-NAME.YOURSUBDOMAIN.workers.dev";
+      if (path === '/ebay') {
+        if (!env.EBAY_USER_TOKEN) {
+          return json({ ok: false, error: 'Missing EBAY_USER_TOKEN' }, 500, request);
+        }
+        const q = url.searchParams.get('q') || '';
+        if (!q.trim()) return json({ ok: false, error: 'Missing q' }, 400, request);
 
-const v = document.getElementById('v');
-const ocrEl = document.getElementById('ocr');
-const qEl = document.getElementById('query');
-const statusEl = document.getElementById('status');
-const intervalEl = document.getElementById('interval');
-const btnStart = document.getElementById('btnStart');
-const btnScan = document.getElementById('btnScan');
-const btnToggle = document.getElementById('btnToggle');
-const resultsEl = document.getElementById('results');
+        // Call eBay Browse API (Production)
+        const ebayUrl = new URL('https://api.ebay.com/buy/browse/v1/item_summary/search');
+        ebayUrl.searchParams.set('q', q);
+        ebayUrl.searchParams.set('limit', '10');
 
-let stream, timer=null, running=false;
+        const resp = await fetch(ebayUrl.toString(), {
+          headers: {
+            'Authorization': `Bearer ${env.EBAY_USER_TOKEN}`,
+            'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US',
+            'Accept': 'application/json'
+          }
+        });
 
-btnStart.onclick = async () => {
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
-      audio: false
-    });
-    v.srcObject = stream;
-    v.onloadedmetadata = () => v.play().catch(()=>{});
-    statusEl.textContent = "Camera running...";
-    startLoop();
-  } catch(e) {
-    statusEl.textContent = "Camera blocked. Allow access and try again.";
-    console.error(e);
+        const text = await resp.text();
+        let data;
+        try { data = JSON.parse(text); } catch {
+          return json({ ok: false, status: resp.status, body: text }, resp.status, request);
+        }
+        return json({ ok: true, status: resp.status, data }, resp.status, request);
+      }
+
+      return json({ ok: false, error: 'Not Found' }, 404, request);
+    } catch (e) {
+      return json({ ok: false, error: String(e) }, 500, request);
+    }
   }
 };
 
-btnToggle.onclick = () => running ? stopLoop() : startLoop();
-btnScan.onclick = () => doScanOnce();
-
-function startLoop(){
-  stopLoop();
-  running = true;
-  btnToggle.textContent = "Pause";
-  const ms = Math.max(600, parseInt(intervalEl.value || "1800",10));
-  timer = setInterval(doScanOnce, ms);
-}
-function stopLoop(){
-  running = false;
-  btnToggle.textContent = "Resume";
-  if (timer) clearInterval(timer), timer=null;
-}
-
-async function doScanOnce(){
-  const img = await grabFrame();
-  if (!img) return;
-  statusEl.textContent = "Analyzing…";
-  try{
-    const r = await fetch(WORKER_URL + "/scan", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ imageBase64: img })
-    });
-    const data = await r.json();
-    if (!data.ok) throw new Error(data.error || "scan failed");
-    ocrEl.value = data.vision?.ocr || "";
-    qEl.value = data.query || "";
-    renderResults(data.ebay);
-    statusEl.textContent = "Done.";
-  }catch(e){
-    statusEl.textContent = "Scan error: " + e.message;
-    console.error(e);
-  }
-}
-
-async function grabFrame(){
-  if (!stream) return null;
-  const track = stream.getVideoTracks()[0];
-  if (!track) return null;
-  const s = track.getSettings();
-  const w = s.width || 1280, h = s.height || 720;
-  const c = document.createElement('canvas');
-  c.width = w; c.height = h;
-  const ctx = c.getContext('2d');
-  // mirror back to normal if needed
-  ctx.translate(w,0); ctx.scale(-1,1);
-  ctx.drawImage(v, 0, 0, w, h);
-  return c.toDataURL('image/jpeg', 0.9);
-}
-
-function renderResults(payload){
-  resultsEl.innerHTML = "";
-  // Browse API
-  if (payload && payload.itemSummaries){
-    payload.itemSummaries.forEach(it=>{
-      const div = document.createElement('div');
-      div.className = 'card';
-      const img = (it.image && it.image.imageUrl) || '';
-      const title = it.title || '(no title)';
-      const price = it.price ? `${it.price.value} ${it.price.currency}` : '';
-      div.innerHTML = `
-        ${img ? `<img src="${img}" alt="">` : ''}
-        <div><strong>${escapeHtml(title)}</strong></div>
-        <div>${price}</div>
-        ${it.itemWebUrl ? `<a href="${it.itemWebUrl}" target="_blank">View on eBay</a>` : ''}
-      `;
-      resultsEl.appendChild(div);
-    });
-    return;
-  }
-  // Finding API
-  const resp = payload?.findItemsByKeywordsResponse?.[0];
-  const items = resp?.searchResult?.[0]?.item || [];
-  items.forEach(it=>{
-    const title = it.title?.[0] || '(no title)';
-    const img = it.galleryURL?.[0] || '';
-    const price = it.sellingStatus?.[0]?.currentPrice?.[0]?.__value__ || '';
-    const cur = it.sellingStatus?.[0]?.currentPrice?.[0]?.["@currencyId"] || '';
-    const url = it.viewItemURL?.[0] || '#';
-    const div = document.createElement('div');
-    div.className = 'card';
-    div.innerHTML = `
-      ${img ? `<img src="${img}" alt="">` : ''}
-      <div><strong>${escapeHtml(title)}</strong></div>
-      <div>${price} ${cur}</div>
-      <a href="${url}" target="_blank">View on eBay</a>
-    `;
-    resultsEl.appendChild(div);
+function json(obj, status = 200, req = null) {
+  const origin = req ? req.headers.get('Origin') : '*';
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: {
+      'content-type': 'application/json',
+      ...corsHeaders(origin)
+    }
   });
 }
 
-function escapeHtml(s){ return String(s).replace(/[&<>"]/g,c=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
-</script>
-</body>
+function corsHeaders(origin) {
+  const headers = {
+    'Access-Control-Allow-Methods': 'GET,OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  };
+  if (origin && origin.startsWith(ALLOW_ORIGIN)) {
+    headers['Access-Control-Allow-Origin'] = ALLOW_ORIGIN;
+  } else {
+    headers['Access-Control-Allow-Origin'] = ALLOW_ORIGIN; // lock to your site
+  }
+  return headers;
+}
