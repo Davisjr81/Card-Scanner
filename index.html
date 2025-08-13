@@ -1,232 +1,205 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Sports Card Scanner</title>
-  <style>
-    :root { --pad:14px; }
-    body{font-family:system-ui,Segoe UI,Roboto,Arial;padding:var(--pad);max-width:980px;margin:0 auto;}
-    .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0;}
-    video{width:100%;max-height:52vh;border:1px solid #ccc;border-radius:8px;background:#111;object-fit:cover}
-    textarea,input{width:100%;padding:10px;border:1px solid #ccc;border-radius:8px;font-size:15px}
-    iframe{width:100%;height:52vh;border:1px solid #ccc;border-radius:8px;background:#fafafa}
-    button{padding:8px 12px;border:1px solid #2b6cb0;background:#2b6cb0;color:#fff;border-radius:8px;cursor:pointer}
-    button.secondary{background:#fff;color:#2b6cb0}
-    .pill{font:12px/1.6 system-ui;border:1px solid #ddd;border-radius:999px;padding:4px 10px;display:inline-block}
-    .muted{opacity:.7}
-    .right{margin-left:auto}
-  </style>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Sports Card Scanner</title>
+<style>
+  :root { --pad:14px; }
+  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;background:#f7f8fa;}
+  .wrap{max-width:980px;margin:0 auto;padding:var(--pad);}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  video{width:100%;max-height:52vh;background:#000;border-radius:10px;object-fit:cover;border:1px solid #e5e7eb}
+  button{padding:8px 12px;border-radius:8px;border:1px solid #cbd5e1;background:#fff;font-weight:600;cursor:pointer}
+  button.primary{background:#2563eb;border-color:#2563eb;color:#fff}
+  button.warn{background:#f97316;border-color:#f97316;color:#fff}
+  input,textarea{width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:8px;background:#fff}
+  .status{font-size:14px;color:#334155;min-height:22px;margin-top:6px}
+  .item{display:flex;gap:12px;border-bottom:1px solid #e5e7eb;padding:10px 0}
+  .item img{width:80px;height:80px;object-fit:cover;border-radius:6px}
+</style>
 </head>
 <body>
-
-  <h2>Sports Card Scanner</h2>
+<div class="wrap">
+  <h2 style="margin:6px 0">Sports Card Scanner</h2>
 
   <video id="v" autoplay playsinline muted></video>
 
-  <div class="row">
+  <div class="row" style="margin-top:10px">
     <button id="btnToggle">Pause</button>
-    <label class="pill">Interval (ms): <input id="interval" type="number" min="600" step="100" value="2400" style="width:90px;margin-left:6px"></label>
-    <label class="pill"><input id="autoStop" type="checkbox" checked> Auto‑stop after first match</label>
-    <button id="btnOnce" class="secondary right">Scan Once</button>
+    <label>Interval (ms):
+      <input id="interval" type="number" min="700" step="100" value="2200" style="width:110px">
+    </label>
+    <button id="btnOnce">Scan Once</button>
+    <button id="btnRescan" class="warn" style="margin-left:auto;display:none">Rescan</button>
   </div>
 
-  <div id="status" class="muted">Starting camera…</div>
+  <div id="status" class="status">Ready.</div>
 
   <h3>OCR Text</h3>
   <textarea id="ocr" rows="5" readonly>(no text yet)</textarea>
 
-  <h3>Search Query</h3>
-  <input id="query" placeholder="Built automatically from OCR…" />
-  <div class="row">
-    <button id="btnSearch" class="secondary">Search</button>
-    <button id="btnResume" class="secondary right" style="display:none">Resume scanning</button>
+  <h3>Built Query</h3>
+  <input id="query" placeholder="auto-built from OCR">
+
+  <div class="row" style="margin-top:8px">
+    <button id="btnSearch" class="primary">Search eBay</button>
   </div>
 
   <h3>eBay Results</h3>
-  <iframe id="ebay" title="eBay results"></iframe>
+  <div id="results"></div>
+  <div id="webLink" class="status" style="margin-top:8px"></div>
+</div>
 
 <script>
-/*** CONFIG ***/
-const WORKER = 'https://YOUR_WORKER_URL'; // e.g. https://rough-glitter-4d48.jamie-davis81.workers.dev
+/*** SET THIS TO YOUR WORKER ***/
+const WORKER_URL = 'https://rough-glitter-4d48.jamie-davis81.workers.dev/';
 
 /*** Elements ***/
 const v = document.getElementById('v');
 const statusEl = document.getElementById('status');
 const ocrEl = document.getElementById('ocr');
-const queryEl = document.getElementById('query');
-const ebayFrame = document.getElementById('ebay');
+const qEl = document.getElementById('query');
 const btnToggle = document.getElementById('btnToggle');
 const btnOnce = document.getElementById('btnOnce');
+const btnRescan = document.getElementById('btnRescan');
 const btnSearch = document.getElementById('btnSearch');
-const btnResume = document.getElementById('btnResume');
 const intervalEl = document.getElementById('interval');
-const autoStopEl = document.getElementById('autoStop');
+const resultsEl = document.getElementById('results');
+const webLinkEl = document.getElementById('webLink');
 
 /*** State ***/
-let stream, timer=null, running=true, lastQuery='', lastVisionText='';
+let stream=null, timer=null, running=true, frozen=false, busy=false;
+
+startCamera();
 
 /*** Camera ***/
 async function startCamera(){
   try{
     stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode:{ideal:'environment'}, width:{ideal:1280}, height:{ideal:720} }, audio:false
+      video: { facingMode:{ideal:'environment'}, width:{ideal:1920}, height:{ideal:1080} },
+      audio:false
     });
-    v.srcObject = stream;
-    await v.play().catch(()=>{});
-    statusEl.textContent = 'Camera running — scanning automatically.';
+    v.srcObject = stream; await v.play().catch(()=>{});
     startLoop();
   }catch(e){
-    statusEl.textContent = 'Camera blocked. Tap "Scan Once" after allowing camera.';
+    status('Camera blocked. Allow access.');
     console.error(e);
   }
 }
+function status(s){ statusEl.textContent = s || ''; }
 
-function stopLoop(){
-  running = false;
-  clearInterval(timer); timer = null;
-  btnToggle.textContent = 'Resume';
-  btnResume.style.display = 'inline-block';
-}
-function startLoop(){
-  running = true;
-  clearInterval(timer);
-  const ms = Math.max(600, parseInt(intervalEl.value||'2400',10));
-  timer = setInterval(scanOnce, ms);
-  btnToggle.textContent = 'Pause';
-  btnResume.style.display = 'none';
-}
-
-/*** Image capture (center crop, un-mirror, slight enhance) ***/
-function grabCroppedFrame(){
+/*** Capture center crop (wider) and mild enhance ***/
+function grabCropped(){
   if (!stream) return null;
-  const track = stream.getVideoTracks()[0]; if (!track) return null;
-  const s = track.getSettings(); const W = s.width || 1280, H = s.height || 720;
-
-  // Wider crop: 88% width, 68% height — tweak to taste
-  const cw = Math.floor(W * 0.88), ch = Math.floor(H * 0.68);
-  const sx = Math.floor((W - cw)/2), sy = Math.floor((H - ch)/2);
-
-  const c = document.createElement('canvas'); c.width = cw; c.height = ch;
+  const W = v.videoWidth || 1280, H = v.videoHeight || 720;
+  const cw = Math.floor(W*0.90), ch = Math.floor(H*0.72);     // widen crop: 90% x 72%
+  const sx = Math.floor((W-cw)/2), sy = Math.floor((H-ch)/2);
+  const c = document.createElement('canvas'); c.width=cw; c.height=ch;
   const ctx = c.getContext('2d');
-  ctx.translate(cw,0); ctx.scale(-1,1);                // un-mirror selfie view
-  ctx.filter = 'contrast(1.25) brightness(1.06)';      // mild boost helps OCR
+  ctx.translate(cw,0); ctx.scale(-1,1);                       // un-mirror
+  ctx.filter = 'contrast(1.24) brightness(1.06)';
   ctx.drawImage(v, sx, sy, cw, ch, 0, 0, cw, ch);
-  return c.toDataURL('image/jpeg', 0.92);
+  // downscale 0.8x to reduce noise/blur
+  const c2 = document.createElement('canvas');
+  c2.width = Math.floor(cw*0.8); c2.height = Math.floor(ch*0.8);
+  c2.getContext('2d').drawImage(c, 0, 0, c2.width, c2.height);
+  return c2.toDataURL('image/jpeg', 0.92);
 }
 
-/*** Vision call via Worker ***/
-async function visionOCR(base64){
-  const resp = await fetch(`${WORKER}/vision`, {
-    method:'POST',
-    headers:{'content-type':'application/json'},
+/*** Call worker: OCR.Space + eBay in one step ***/
+async function analyzeAndSearch(base64){
+  const r = await fetch(`${WORKER_URL}/analyze_search`, {
+    method:'POST', headers:{'content-type':'application/json'},
     body: JSON.stringify({ imageBase64: base64 })
   });
-  if (!resp.ok) throw new Error('Vision error '+resp.status);
-  return await resp.json(); // expected {ocr, labels, webEntities}
+  if (!r.ok) throw new Error('HTTP '+r.status);
+  return await r.json();
 }
 
-/*** Query builder — cleans & prioritizes key tokens ***/
-function buildQuery(text, labels=[]){
-  if (!text) return '';
-  let q = text.toLowerCase()
-    .replace(/[^\w\s\-\/]/g,' ')
-    .replace(/\s+/g,' ')
-    .trim();
-
-  // Promote likely card tokens
-  const BRANDS = ['topps','panini','prizm','select','optic','mosaic','donruss','bowman','chrome','heritage','finest','stadium','upper deck','fleer','score'];
-  const SPORTS = ['rc','rookie','baseball','basketball','football','mlb','nba','nfl'];
-  const YEARS  = /\b(19|20)\d{2}\b/g;
-
-  const foundYear = (q.match(YEARS)||[]).slice(0,1);
-  const brand = BRANDS.find(b=>q.includes(b)) || (labels||[]).map(s=>s.toLowerCase()).find(s=>BRANDS.some(b=>s.includes(b)));
-  // crude player guess: two capitalized words from original (before lowercasing)
-  const nameGuess = (lastVisionText || '')
-    .replace(/[^\w\s\-']/g,' ')
-    .split(/\s+/)
-    .filter(w=>/^[A-Z][a-z]+$/.test(w))
-    .slice(0,6);
-  let player='';
-  for (let i=0;i+1<nameGuess.length;i++){
-    if (nameGuess[i].length>1 && nameGuess[i+1].length>1){
-      player = `${nameGuess[i]} ${nameGuess[i+1]}`; break;
-    }
-  }
-
-  const parts = [];
-  if (foundYear[0]) parts.push(foundYear[0]);
-  if (brand) parts.push(brand);
-  if (player) parts.push(player);
-  if (!parts.length){
-    // fallback: keep some nouns from text
-    const keep = q.split(' ').filter(w => w.length>2 && !SPORTS.includes(w)).slice(0,6);
-    parts.push(...keep);
-  }
-
-  return parts.join(' ').trim();
+/*** Loop control ***/
+function startLoop(){
+  stopLoop();
+  running=true; btnToggle.textContent='Pause';
+  const ms = Math.max(900, parseInt(intervalEl.value||'2200',10));
+  timer = setInterval(()=>scanOnce(false), ms);
 }
-
-/*** eBay URL (no-key public search) ***/
-function ebayURL(query){
-  const kw = encodeURIComponent(query);
-  return `https://www.ebay.com/sch/i.html?_nkw=${kw}`;
+function stopLoop(){
+  running=false; if (timer) clearInterval(timer), timer=null;
+  btnToggle.textContent='Resume';
 }
+function freeze(){
+  frozen=true; stopLoop();
+  btnRescan.style.display='inline-block';
+  btnToggle.disabled=true; btnOnce.disabled=true;
+  status('Frozen after results — tap Rescan to continue.');
+}
+btnToggle.onclick = ()=> running ? stopLoop() : startLoop();
+btnOnce.onclick = ()=> scanOnce(true);
+btnRescan.onclick = ()=>{
+  frozen=false; btnRescan.style.display='none'; btnToggle.disabled=false; btnOnce.disabled=false;
+  resultsEl.innerHTML=''; webLinkEl.textContent=''; ocrEl.value='(no text yet)'; qEl.value='';
+  status('Resuming…'); startLoop();
+};
+btnSearch.onclick = ()=>{
+  const q=(qEl.value||'').trim(); if(!q) return;
+  window.open(`https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(q)}`,'_blank');
+  freeze();
+};
 
-/*** Main scan ***/
-let busy = false;
-async function scanOnce(){
-  if (busy) return;
-  busy = true;
+/*** One scan ***/
+async function scanOnce(stopAfter=true){
+  if (busy || frozen) return;
+  busy=true;
   try{
-    const base64 = grabCroppedFrame();
-    if (!base64){ busy=false; return; }
+    const base64 = grabCropped(); if (!base64){ busy=false; return; }
+    status('Analyzing…');
+    const j = await analyzeAndSearch(base64);
 
-    statusEl.textContent = 'Analyzing…';
-    const r = await visionOCR(base64);
-    const text = (r && r.ocr) || '';
-    lastVisionText = text;
-    ocrEl.value = text || '(no text yet)';
+    const ocr = j.ocr || '';
+    const query = j.query || '';
+    const items = Array.isArray(j.items) ? j.items : [];
+    const webUrl = j.webUrl;
 
-    const labels = (r && r.labels) || [];
-    const q = buildQuery(text, labels);
-    queryEl.value = q;
+    ocrEl.value = ocr || '(no text yet)';
+    qEl.value = query || '';
 
-    if (q && q !== lastQuery){
-      lastQuery = q;
-      ebayFrame.src = ebayURL(q);
-      statusEl.textContent = `Searching eBay for “${q}”…`;
+    // Clear result area
+    resultsEl.innerHTML = ''; webLinkEl.textContent = '';
 
-      if (autoStopEl.checked){
-        stopLoop();
-        statusEl.textContent = `Stopped after sending “${q}”. Tap “Resume scanning” when ready.`;
-      }
+    if (items.length){
+      // Structured API results
+      resultsEl.innerHTML = items.map(it=>{
+        const title = it.title || '—';
+        const price = (it.price && it.price.value && it.price.currency) ? `${it.price.value} ${it.price.currency}` : '';
+        const img = it.image && it.image.imageUrl ? it.image.imageUrl : '';
+        const link = it.itemWebUrl || '#';
+        return `
+          <div class="item">
+            ${img ? `<img src="${img}" alt="">` : `<div style="width:80px;height:80px;background:#f1f5f9;border-radius:6px"></div>`}
+            <div>
+              <div style="font-weight:600">${title}</div>
+              <div>${price}</div>
+              <a href="${link}" target="_blank" rel="noopener">View on eBay</a>
+            </div>
+          </div>
+        `;
+      }).join('');
+      if (stopAfter) freeze(); else status('Scanning…');
+    } else if (webUrl && query){
+      // Fallback: openable web search link
+      webLinkEl.innerHTML = `No API results — <a href="${webUrl}" target="_blank" rel="noopener">open eBay search for “${query}”</a>`;
+      if (stopAfter) freeze(); else status('Scanning…');
     } else {
-      statusEl.textContent = 'Scanning…';
+      status('Low confidence — hold steady or adjust lighting.');
     }
   }catch(e){
     console.error(e);
-    statusEl.textContent = 'Scan error — will retry';
+    status('Scan error — '+e.message);
   }finally{
-    busy = false;
+    busy=false;
   }
 }
-
-/*** UI events ***/
-btnToggle.addEventListener('click', ()=>{
-  if (running) stopLoop(); else startLoop();
-});
-btnOnce.addEventListener('click', scanOnce);
-btnResume.addEventListener('click', startLoop);
-btnSearch.addEventListener('click', ()=>{
-  const q = (queryEl.value||'').trim();
-  if (!q) return;
-  ebayFrame.src = ebayURL(q);
-  if (autoStopEl.checked) stopLoop();
-});
-
-/*** Start ***/
-startCamera();
 </script>
 </body>
 </html>
