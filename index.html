@@ -1,235 +1,232 @@
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html>
 <head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Sports Card Scanner</title>
-<style>
-  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial}
-  .wrap{max-width:980px;margin:0 auto;padding:14px}
-  video{width:100%;max-height:48vh;background:#000;border-radius:8px}
-  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0}
-  .btn{padding:8px 14px;border:1px solid #ccc;border-radius:8px;background:#fff;font-weight:600;cursor:pointer}
-  .btn.primary{background:#2563eb;border-color:#2563eb;color:#fff}
-  .pill{padding:4px 8px;border:1px solid #e5e7eb;border-radius:999px;font-size:12px;color:#334155}
-  .item{display:flex;gap:12px;padding:10px 0;border-bottom:1px solid #eee}
-  .item img{width:80px;height:80px;object-fit:cover;border-radius:6px}
-  textarea{width:100%;height:110px;border:1px solid #ddd;border-radius:8px;padding:10px}
-  input[type=text],input[type=number]{padding:8px 10px;border:1px solid #ccc;border-radius:8px}
-</style>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sports Card Scanner</title>
+  <style>
+    :root { --pad:14px; }
+    body{font-family:system-ui,Segoe UI,Roboto,Arial;padding:var(--pad);max-width:980px;margin:0 auto;}
+    .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0;}
+    video{width:100%;max-height:52vh;border:1px solid #ccc;border-radius:8px;background:#111;object-fit:cover}
+    textarea,input{width:100%;padding:10px;border:1px solid #ccc;border-radius:8px;font-size:15px}
+    iframe{width:100%;height:52vh;border:1px solid #ccc;border-radius:8px;background:#fafafa}
+    button{padding:8px 12px;border:1px solid #2b6cb0;background:#2b6cb0;color:#fff;border-radius:8px;cursor:pointer}
+    button.secondary{background:#fff;color:#2b6cb0}
+    .pill{font:12px/1.6 system-ui;border:1px solid #ddd;border-radius:999px;padding:4px 10px;display:inline-block}
+    .muted{opacity:.7}
+    .right{margin-left:auto}
+  </style>
 </head>
 <body>
-<div class="wrap">
-  <h1>Sports Card Scanner</h1>
+
+  <h2>Sports Card Scanner</h2>
+
+  <video id="v" autoplay playsinline muted></video>
 
   <div class="row">
-    <button id="btnConnect" class="btn primary" style="display:none">Connect eBay</button>
-    <span id="exp" class="pill" style="display:none"></span>
+    <button id="btnToggle">Pause</button>
+    <label class="pill">Interval (ms): <input id="interval" type="number" min="600" step="100" value="2400" style="width:90px;margin-left:6px"></label>
+    <label class="pill"><input id="autoStop" type="checkbox" checked> Auto‑stop after first match</label>
+    <button id="btnOnce" class="secondary right">Scan Once</button>
   </div>
 
-  <div class="row">
-    <input id="manual" type="text" placeholder="Type a search (e.g., 2019 Prizm Zion Williamson rookie)" style="flex:1">
-    <button id="btnManual" class="btn primary">Search</button>
-  </div>
-
-  <video id="v" playsinline muted></video>
-
-  <div class="row">
-    <button id="btnToggle" class="btn">Pause</button>
-    <div>Interval (ms): <input id="interval" type="number" value="2200" min="600" step="100" style="width:100px"></div>
-    <button id="btnOnce" class="btn">Scan Once</button>
-    <span id="status"></span>
-    <span id="statePill" class="pill">Live</span>
-    <button id="btnRescan" class="btn" style="margin-left:auto;display:none">Rescan</button>
-  </div>
+  <div id="status" class="muted">Starting camera…</div>
 
   <h3>OCR Text</h3>
-  <textarea id="ocr" readonly>(no text yet)</textarea>
+  <textarea id="ocr" rows="5" readonly>(no text yet)</textarea>
 
   <h3>Search Query</h3>
-  <input id="query" type="text" placeholder="Auto-filled from OCR…" style="width:100%">
-
+  <input id="query" placeholder="Built automatically from OCR…" />
   <div class="row">
-    <button id="btnSearch" class="btn primary">Search</button>
+    <button id="btnSearch" class="secondary">Search</button>
+    <button id="btnResume" class="secondary right" style="display:none">Resume scanning</button>
   </div>
 
   <h3>eBay Results</h3>
-  <div id="ebayResults"></div>
-</div>
+  <iframe id="ebay" title="eBay results"></iframe>
 
 <script>
-const WORKER_BASE = 'https://rough-glitter-4d48.jamie-davis81.workers.dev';
-const VIDEO_IDEAL = { width:{ideal:1920}, height:{ideal:1080}, facingMode:{ideal:'environment'} };
+/*** CONFIG ***/
+const WORKER = 'https://YOUR_WORKER_URL'; // e.g. https://rough-glitter-4d48.jamie-davis81.workers.dev
 
+/*** Elements ***/
 const v = document.getElementById('v');
-const btnConnect = document.getElementById('btnConnect');
-const expEl = document.getElementById('exp');
-const manualEl = document.getElementById('manual');
-const btnManual = document.getElementById('btnManual');
+const statusEl = document.getElementById('status');
+const ocrEl = document.getElementById('ocr');
+const queryEl = document.getElementById('query');
+const ebayFrame = document.getElementById('ebay');
 const btnToggle = document.getElementById('btnToggle');
 const btnOnce = document.getElementById('btnOnce');
 const btnSearch = document.getElementById('btnSearch');
-const btnRescan = document.getElementById('btnRescan');
+const btnResume = document.getElementById('btnResume');
 const intervalEl = document.getElementById('interval');
-const statusEl = document.getElementById('status');
-const statePill = document.getElementById('statePill');
-const ocrEl = document.getElementById('ocr');
-const queryEl = document.getElementById('query');
-const resultsEl = document.getElementById('ebayResults');
+const autoStopEl = document.getElementById('autoStop');
 
-let stream=null, timer=null, running=false, frozen=false, lastQuery='';
+/*** State ***/
+let stream, timer=null, running=true, lastQuery='', lastVisionText='';
 
-function status(s){ statusEl.textContent = s || ''; }
-function setLive(isLive){
-  statePill.textContent = isLive ? 'Live' : 'Frozen';
-  statePill.style.background = isLive ? '' : '#fff7ed';
-  statePill.style.borderColor = isLive ? '#e5e7eb' : '#fdba74';
-  statePill.style.color = isLive ? '#334155' : '#9a3412';
-}
-
-// ---- eBay connect/status ----
-async function checkStatus(){
-  try{
-    const r = await fetch(`${WORKER_BASE}/status`);
-    const j = await r.json();
-    if (!j.ok || !j.connected){
-      btnConnect.style.display = 'inline-block';
-      expEl.style.display = 'none';
-    } else {
-      btnConnect.style.display = 'none';
-      if (j.expiresAt){
-        const ms = (j.expiresAt*1000) - Date.now();
-        const mins = Math.max(0, Math.floor(ms/60000));
-        expEl.textContent = `Token OK · ~${mins}m left`;
-        expEl.style.display = 'inline-block';
-      }
-    }
-  }catch(e){}
-}
-btnConnect.onclick = () => { location.href = `${WORKER_BASE}/auth/start`; };
-
-// ---- Camera & OCR (via Worker /vision) ----
+/*** Camera ***/
 async function startCamera(){
   try{
-    stream = await navigator.mediaDevices.getUserMedia({ video: VIDEO_IDEAL, audio:false });
-    v.srcObject = stream; await v.play();
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode:{ideal:'environment'}, width:{ideal:1280}, height:{ideal:720} }, audio:false
+    });
+    v.srcObject = stream;
+    await v.play().catch(()=>{});
+    statusEl.textContent = 'Camera running — scanning automatically.';
     startLoop();
-  }catch(e){ status('Camera blocked'); console.error(e); }
-}
-function grabFrame(){
-  if(!stream) return null;
-  const track = stream.getVideoTracks()[0]; if(!track) return null;
-  const s = track.getSettings(); const w=s.width||1280, h=s.height||720;
-  const c = document.createElement('canvas'); c.width=w; c.height=h;
-  const ctx = c.getContext('2d');
-  ctx.translate(w,0); ctx.scale(-1,1);
-  ctx.filter = 'contrast(1.15) brightness(1.03)';
-  ctx.drawImage(v,0,0,w,h);
-  return c.toDataURL('image/jpeg', 0.9);
-}
-async function getTextFromFrame(base64){
-  const r = await fetch(`${WORKER_BASE}/vision`, {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ imageBase64: base64 })
-  });
-  const j = await r.json();
-  if (!j.ok) throw new Error(j.error || 'Vision failed');
-  return (j.ocr || '').replace(/\s+/g,' ').trim();
-}
-
-// ---- Query builder ----
-function buildQuery(text){
-  let q = text.replace(/[^\w\s\-]/g,' ').replace(/\s{2,}/g,' ').trim();
-  const toks = q.split(' ');
-  const keep = [];
-  for (const t of toks){
-    if (!t) continue;
-    if (/^(19|20)\d{2}$/.test(t)) { keep.push(t); continue; } // year
-    if (/^(Topps|Panini|Prizm|Select|Optic|Donruss|Bowman|Upper|Deck|Leaf|Mosaic|RC|Rookie)$/i.test(t)) { keep.push(t); continue; }
-    if (/^[A-Z][a-z]+$/.test(t)) { keep.push(t); continue; }  // name-ish
-    if (/^[A-Z]{2,}$/.test(t)) { keep.push(t); continue; }
-  }
-  if (keep.length >= 2) q = keep.slice(0, 12).join(' ');
-  return q || text || '';
-}
-
-// ---- Loop control ----
-function stopLoop(){ running=false; if(timer) clearInterval(timer), timer=null; btnToggle.textContent='Resume'; setLive(false); }
-function startLoop(){ if(frozen) return; stopLoop(); running=true; btnToggle.textContent='Pause'; setLive(true); timer=setInterval(scanOnce, Math.max(600, parseInt(intervalEl.value||'2200',10))); }
-
-// ---- Scan once ----
-async function scanOnce(){
-  if (frozen) return;
-  try{
-    status('Reading…');
-    const base64 = grabFrame(); if (!base64) return;
-    let text = await getTextFromFrame(base64);
-    if (text.length > 300) text = text.slice(0,300);
-    ocrEl.value = text || '(no text yet)';
-    if (!text) return;
-
-    const q = buildQuery(text);
-    queryEl.value = q;
-    if (q && q !== lastQuery) {
-      lastQuery = q;
-      await searchEbay(q, /*freezeAfter=*/true);
-    }
-    status('');
   }catch(e){
-    status('Scan error — retrying');
+    statusEl.textContent = 'Camera blocked. Tap "Scan Once" after allowing camera.';
     console.error(e);
   }
 }
 
-// ---- eBay search via Worker ----
-async function searchEbay(q, freezeAfter=false){
-  try{
-    status('Searching eBay…');
-    const r = await fetch(`${WORKER_BASE}/ebay?q=${encodeURIComponent(q)}`);
-    const j = await r.json();
-    if (!j.ok){ resultsEl.innerHTML = `<div>eBay error: ${j.status||''} ${j.error||''}</div>`; return; }
-    const items = (j.data && j.data.itemSummaries) || [];
-    if (!items.length){ resultsEl.innerHTML = '<div>No results.</div>'; return; }
-    resultsEl.innerHTML = items.map(it=>{
-      const title = it.title || '—';
-      const price = it.price ? `${it.price.value} ${it.price.currency}` : '';
-      const img = it.image?.imageUrl || '';
-      const link = it.itemWebUrl || '#';
-      return `<div class="item">
-        ${img ? `<img src="${img}" alt="">` : ''}
-        <div><div style="font-weight:600">${title}</div><div>${price}</div>
-        <a href="${link}" target="_blank" rel="noopener">View on eBay</a></div></div>`;
-    }).join('');
+function stopLoop(){
+  running = false;
+  clearInterval(timer); timer = null;
+  btnToggle.textContent = 'Resume';
+  btnResume.style.display = 'inline-block';
+}
+function startLoop(){
+  running = true;
+  clearInterval(timer);
+  const ms = Math.max(600, parseInt(intervalEl.value||'2400',10));
+  timer = setInterval(scanOnce, ms);
+  btnToggle.textContent = 'Pause';
+  btnResume.style.display = 'none';
+}
 
-    if (freezeAfter){
-      frozen = true; stopLoop();
-      btnRescan.style.display='inline-block';
-      btnToggle.disabled=true; btnOnce.disabled=true;
-      status('Frozen after results — click Rescan');
+/*** Image capture (center crop, un-mirror, slight enhance) ***/
+function grabCroppedFrame(){
+  if (!stream) return null;
+  const track = stream.getVideoTracks()[0]; if (!track) return null;
+  const s = track.getSettings(); const W = s.width || 1280, H = s.height || 720;
+
+  // Wider crop: 88% width, 68% height — tweak to taste
+  const cw = Math.floor(W * 0.88), ch = Math.floor(H * 0.68);
+  const sx = Math.floor((W - cw)/2), sy = Math.floor((H - ch)/2);
+
+  const c = document.createElement('canvas'); c.width = cw; c.height = ch;
+  const ctx = c.getContext('2d');
+  ctx.translate(cw,0); ctx.scale(-1,1);                // un-mirror selfie view
+  ctx.filter = 'contrast(1.25) brightness(1.06)';      // mild boost helps OCR
+  ctx.drawImage(v, sx, sy, cw, ch, 0, 0, cw, ch);
+  return c.toDataURL('image/jpeg', 0.92);
+}
+
+/*** Vision call via Worker ***/
+async function visionOCR(base64){
+  const resp = await fetch(`${WORKER}/vision`, {
+    method:'POST',
+    headers:{'content-type':'application/json'},
+    body: JSON.stringify({ imageBase64: base64 })
+  });
+  if (!resp.ok) throw new Error('Vision error '+resp.status);
+  return await resp.json(); // expected {ocr, labels, webEntities}
+}
+
+/*** Query builder — cleans & prioritizes key tokens ***/
+function buildQuery(text, labels=[]){
+  if (!text) return '';
+  let q = text.toLowerCase()
+    .replace(/[^\w\s\-\/]/g,' ')
+    .replace(/\s+/g,' ')
+    .trim();
+
+  // Promote likely card tokens
+  const BRANDS = ['topps','panini','prizm','select','optic','mosaic','donruss','bowman','chrome','heritage','finest','stadium','upper deck','fleer','score'];
+  const SPORTS = ['rc','rookie','baseball','basketball','football','mlb','nba','nfl'];
+  const YEARS  = /\b(19|20)\d{2}\b/g;
+
+  const foundYear = (q.match(YEARS)||[]).slice(0,1);
+  const brand = BRANDS.find(b=>q.includes(b)) || (labels||[]).map(s=>s.toLowerCase()).find(s=>BRANDS.some(b=>s.includes(b)));
+  // crude player guess: two capitalized words from original (before lowercasing)
+  const nameGuess = (lastVisionText || '')
+    .replace(/[^\w\s\-']/g,' ')
+    .split(/\s+/)
+    .filter(w=>/^[A-Z][a-z]+$/.test(w))
+    .slice(0,6);
+  let player='';
+  for (let i=0;i+1<nameGuess.length;i++){
+    if (nameGuess[i].length>1 && nameGuess[i+1].length>1){
+      player = `${nameGuess[i]} ${nameGuess[i+1]}`; break;
+    }
+  }
+
+  const parts = [];
+  if (foundYear[0]) parts.push(foundYear[0]);
+  if (brand) parts.push(brand);
+  if (player) parts.push(player);
+  if (!parts.length){
+    // fallback: keep some nouns from text
+    const keep = q.split(' ').filter(w => w.length>2 && !SPORTS.includes(w)).slice(0,6);
+    parts.push(...keep);
+  }
+
+  return parts.join(' ').trim();
+}
+
+/*** eBay URL (no-key public search) ***/
+function ebayURL(query){
+  const kw = encodeURIComponent(query);
+  return `https://www.ebay.com/sch/i.html?_nkw=${kw}`;
+}
+
+/*** Main scan ***/
+let busy = false;
+async function scanOnce(){
+  if (busy) return;
+  busy = true;
+  try{
+    const base64 = grabCroppedFrame();
+    if (!base64){ busy=false; return; }
+
+    statusEl.textContent = 'Analyzing…';
+    const r = await visionOCR(base64);
+    const text = (r && r.ocr) || '';
+    lastVisionText = text;
+    ocrEl.value = text || '(no text yet)';
+
+    const labels = (r && r.labels) || [];
+    const q = buildQuery(text, labels);
+    queryEl.value = q;
+
+    if (q && q !== lastQuery){
+      lastQuery = q;
+      ebayFrame.src = ebayURL(q);
+      statusEl.textContent = `Searching eBay for “${q}”…`;
+
+      if (autoStopEl.checked){
+        stopLoop();
+        statusEl.textContent = `Stopped after sending “${q}”. Tap “Resume scanning” when ready.`;
+      }
+    } else {
+      statusEl.textContent = 'Scanning…';
     }
   }catch(e){
-    resultsEl.innerHTML = `<div>Search failed: ${e}</div>`;
+    console.error(e);
+    statusEl.textContent = 'Scan error — will retry';
   }finally{
-    if (!frozen) status('');
+    busy = false;
   }
 }
 
-// ---- Rescan + Manual ----
-btnRescan.onclick = ()=>{ frozen=false; btnRescan.style.display='none'; btnToggle.disabled=false; btnOnce.disabled=false; lastQuery=''; startLoop(); };
-btnSearch.onclick = () => { const q=(queryEl.value||'').trim(); if(q) searchEbay(q,true); };
-btnManual.onclick = () => { const q=(manualEl.value||'').trim(); if(q){ queryEl.value=q; searchEbay(q,true); } };
-manualEl.addEventListener('keydown', e => { if (e.key==='Enter'){ e.preventDefault(); btnManual.click(); }});
-btnToggle.onclick = () => running ? stopLoop() : startLoop();
-btnOnce.onclick = scanOnce;
-
-// ---- Init ----
-document.addEventListener('DOMContentLoaded', async ()=>{
-  await checkStatus();
-  try{
-    const p = navigator.permissions && await navigator.permissions.query({ name:'camera' });
-    if (p && p.state==='granted') startCamera();
-  }catch{}
+/*** UI events ***/
+btnToggle.addEventListener('click', ()=>{
+  if (running) stopLoop(); else startLoop();
 });
+btnOnce.addEventListener('click', scanOnce);
+btnResume.addEventListener('click', startLoop);
+btnSearch.addEventListener('click', ()=>{
+  const q = (queryEl.value||'').trim();
+  if (!q) return;
+  ebayFrame.src = ebayURL(q);
+  if (autoStopEl.checked) stopLoop();
+});
+
+/*** Start ***/
+startCamera();
 </script>
 </body>
 </html>
