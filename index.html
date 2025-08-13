@@ -2,21 +2,19 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Sports Card Scanner (Local OCR)</title>
+  <title>Sports Card Scanner (Vision → eBay)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <!-- Tesseract.js (runs OCR locally; no key needed) -->
-  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
   <style>
     :root { --pad: 14px; }
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin:0; padding:var(--pad); background:#f7f7f7; color:#222; }
     #wrap { max-width: 980px; margin: 0 auto; }
     h2 { margin: 6px 0 10px; }
-    video { width: 100%; max-height: 48vh; background:#000; border:1px solid #ddd; border-radius:8px; display:block; }
+    video { width: 100%; max-height: 70vh; background:#000; border:1px solid #ddd; border-radius:8px; display:block; }
     .row { display:flex; gap:10px; align-items:center; margin:10px 0; flex-wrap:wrap; }
     button { padding:10px 14px; border-radius:8px; border:1px solid #ccc; background:#fff; cursor:pointer; }
-    input[type="number"] { padding:8px; width:100px; }
+    input[type="number"] { padding:8px; width:110px; }
     #status { font-size: 14px; color:#555; margin: 6px 0; }
-    #ocrText, #queryBox { width:100%; min-height:48px; background:#fff; border:1px solid #ddd; border-radius:8px; padding:8px; white-space:pre-wrap; }
+    #visionText, #queryBox { width:100%; min-height:48px; background:#fff; border:1px solid #ddd; border-radius:8px; padding:8px; white-space:pre-wrap; }
     .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:10px; margin-top:8px; }
     .card { background:#fff; border:1px solid #ddd; border-radius:10px; padding:10px; }
     .price { font-weight:600; margin-top:6px; }
@@ -25,7 +23,7 @@
 </head>
 <body>
 <div id="wrap">
-  <h2>Sports Card Scanner (Local OCR)</h2>
+  <h2>Sports Card Scanner</h2>
 
   <video id="v" playsinline muted></video>
 
@@ -33,22 +31,22 @@
     <button id="startBtn" type="button">Start Camera</button>
     <button id="toggleBtn" type="button">Pause</button>
     <label>Interval (ms):
-      <input id="interval" type="number" value="1800" min="600" step="100">
+      <input id="interval" type="number" value="3500" min="1200" step="100">
     </label>
     <button id="scanOnceBtn" type="button">Scan Once</button>
   </div>
 
   <div id="status">Idle.</div>
 
-  <h4>OCR Text</h4>
-  <div id="ocrText">(none)</div>
+  <h4>Vision Text (OCR + labels/web)</h4>
+  <div id="visionText">(none)</div>
 
   <h4>Search Query</h4>
   <div id="queryBox">(none)</div>
 
   <h4>eBay Results</h4>
   <div id="results" class="grid"></div>
-  <div class="note">Tip: fill the frame with the card, avoid glare, and keep it steady for 2–3 scans.</div>
+  <div class="note">Tip: fill the frame with the card and avoid glare for better OCR.</div>
 </div>
 
 <script>
@@ -60,14 +58,14 @@ const toggleBtn = document.getElementById('toggleBtn');
 const intervalInput = document.getElementById('interval');
 const scanOnceBtn = document.getElementById('scanOnceBtn');
 const statusEl = document.getElementById('status');
-const ocrEl = document.getElementById('ocrText');
+const visionEl = document.getElementById('visionText');
 const queryEl = document.getElementById('queryBox');
 const resultsEl = document.getElementById('results');
 
 let stream = null, timer = null, running = false;
-let lastQuery = "", lastOCR = "", stableCount = 0, lastSearchAt = 0;
-const REQUIRED_STABLE = 2;   // same OCR twice in a row
-const MIN_DELAY = 8000;      // min ms between searches
+let lastCombined = "", lastQuery = "", stableCount = 0, lastSearchAt = 0;
+const REQUIRED_STABLE = 3;   // require 3 consistent scans before search
+const MIN_DELAY = 12000;     // min ms between eBay searches
 
 startBtn.addEventListener('click', startCamera);
 toggleBtn.addEventListener('click', () => running ? stopLoop() : startLoop());
@@ -77,7 +75,7 @@ scanOnceBtn.addEventListener('click', scanOnce);
 async function startCamera(){
   try{
     stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: "environment" }, width:{ideal:1280}, height:{ideal:720} },
+      video: { facingMode: { ideal: "environment" }, width:{ideal:1920}, height:{ideal:1080} },
       audio: false
     });
     v.srcObject = stream;
@@ -87,7 +85,7 @@ async function startCamera(){
     startLoop();
   }catch(e){
     console.error(e);
-    statusEl.textContent = "Camera blocked. Click Start and allow camera access.";
+    statusEl.textContent = "Camera blocked. Allow access and try again.";
   }
 }
 function stopLoop(){
@@ -100,15 +98,16 @@ function startLoop(){
   stopLoop();
   running = true;
   toggleBtn.textContent = "Pause";
-  const ms = Math.max(600, parseInt(intervalInput.value || "1800", 10));
+  const ms = Math.max(1200, parseInt(intervalInput.value || "3500", 10));
   timer = setInterval(scanOnce, ms);
   scanOnce();
 }
 
+/* Capture a downsized frame for faster/cheaper processing */
 function grabFrameBase64(){
   if (!v || v.readyState < 2) return null;
-  const w = v.videoWidth || 1280, h = v.videoHeight || 720;
-  const targetW = Math.min(1024, w);
+  const w = v.videoWidth || 1920, h = v.videoHeight || 1080;
+  const targetW = Math.min(1280, w);
   const targetH = Math.round(h * (targetW / w));
   const c = document.createElement('canvas');
   c.width = targetW; c.height = targetH;
@@ -117,68 +116,52 @@ function grabFrameBase64(){
   return c.toDataURL('image/jpeg', 0.85);
 }
 
-async function localOCR(base64){
-  const blob = await (await fetch(base64)).blob();
-  const { data: { text } } = await Tesseract.recognize(blob, 'eng', { logger: m => console.log(m) });
-  return (text || "").replace(/\s+/g, " ").trim();
-}
-
-function buildQueryFromText(t){
-  // keep it short & stable
-  return (t || "")
-    .replace(/[^\w\s#-]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .split(/\s+/)
-    .slice(0, 12)
-    .join(" ");
-}
-
 async function scanOnce(){
   try{
     const base64 = grabFrameBase64();
     if (!base64) return;
 
-    statusEl.textContent = "Running local OCR…";
-    const text = await localOCR(base64);
-    ocrEl.textContent = text || "(none)";
+    statusEl.textContent = "Analyzing with Vision…";
+    const res = await fetch(WORKER_BASE + "/scan", {
+      method: "POST",
+      headers: { "Content-Type":"application/json" },
+      body: JSON.stringify({ imageBase64: base64 })
+    });
+    const data = await res.json().catch(()=>({ ok:false, error:"Bad JSON" }));
 
-    if (!text || text.length < 4){
-      stableCount = 0;
-      statusEl.textContent = "No readable text yet. Adjust lighting or move closer.";
+    if (!res.ok || !data.ok) {
+      statusEl.textContent = `Scan error (${data?.stage || res.status}): ${data?.error || res.statusText}`;
       return;
     }
 
-    // Stability check
-    if (text === lastOCR) stableCount++; else { stableCount = 1; lastOCR = text; }
+    // Compose a readable summary of what Vision saw
+    const summary = [
+      data.vision?.ocr || "",
+      Array.isArray(data.vision?.entities) ? " | Labels: " + data.vision.entities.slice(0,3).join(", ") : "",
+      Array.isArray(data.vision?.guesses) && data.vision.guesses[0] ? " | Web: " + data.vision.guesses[0] : ""
+    ].join("").trim();
+    visionEl.textContent = summary || "(none)";
 
-    if (stableCount >= REQUIRED_STABLE){
-      const query = buildQueryFromText(text);
-      queryEl.textContent = query || "(none)";
+    // Query from the Worker
+    queryEl.textContent = data.query || "(none)";
 
-      const now = Date.now();
-      if (query && (now - lastSearchAt) > MIN_DELAY && query !== lastQuery){
-        statusEl.textContent = "Searching eBay…";
-        const ebay = await fetch(WORKER_BASE + "/ebay", {
-          method: "POST",
-          headers: { "Content-Type":"application/json" },
-          body: JSON.stringify({ query })
-        });
-        const data = await ebay.json().catch(()=>({ok:false}));
-        if (!ebay.ok || !data.ok){
-          statusEl.textContent = `eBay error: ${data?.error || ebay.statusText}`;
-        } else {
-          renderEbay(data);
-          lastSearchAt = now;
-          lastQuery = query;
-          statusEl.textContent = "OK";
-        }
-        stableCount = 0;
-      }
+    // Stabilize before hitting eBay
+    const combined = (summary + " " + (data.query || "")).trim();
+    if (combined === lastCombined) stableCount++; else { stableCount = 1; lastCombined = combined; }
+
+    const now = Date.now();
+    const canSearch = (stableCount >= REQUIRED_STABLE) && (now - lastSearchAt > MIN_DELAY);
+
+    if (canSearch && data.query && data.query !== lastQuery) {
+      statusEl.textContent = "Showing eBay results…";
+      renderEbay(data.ebay);
+      lastSearchAt = now;
+      lastQuery = data.query;
+      stableCount = 0;
+      statusEl.textContent = "OK";
     } else {
       statusEl.textContent = `Stabilizing (${stableCount}/${REQUIRED_STABLE})…`;
     }
-
   }catch(e){
     console.error(e);
     statusEl.textContent = "Scan error. Retrying…";
@@ -209,7 +192,7 @@ function renderEbay(payload){
   }
 }
 
-// Auto-start camera if already granted
+/* Auto-start camera if already granted */
 document.addEventListener("DOMContentLoaded", function(){
   if (navigator.permissions && navigator.permissions.query){
     navigator.permissions.query({ name: "camera" })
